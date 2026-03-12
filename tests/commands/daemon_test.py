@@ -657,13 +657,11 @@ def test_cache_result_isolated_between_repos(store, tempdir_factory):
 
 
 # ---------------------------------------------------------------------------
-# --only-failing filter
+# --filter statuses
 # ---------------------------------------------------------------------------
 
-def test_show_cache_summary_only_failing_hides_passing(
-        cap_out, store, in_git_dir,
-):
-    """--only-failing: passing files are omitted, failing ones shown."""
+def test_show_cache_summary_filter_fail_only(cap_out, store, in_git_dir):
+    """--filter fail: passing files are omitted, failing ones shown."""
     import shlex
     import sys
     _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
@@ -698,16 +696,20 @@ def test_show_cache_summary_only_failing_hides_passing(
             store.set_hook_result(hk, 'pass.py', _file_hash('pass.py'), 0)
             store.set_hook_result(hk, 'fail.py', _file_hash('fail.py'), 1)
 
-        # Without filter: both shown
-        _show_cache_summary('.pre-commit-config.yaml', store)
+        # Default (fail,pass): both shown
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store,
+            filter_statuses={'fail', 'pass'},
+        )
     printed_all = cap_out.get_bytes()
     assert b'pass.py' in printed_all
     assert b'fail.py' in printed_all
 
     with cwd(str(in_git_dir)):
-        # With only_failing: only failing file shown
+        # filter=fail: only failing file shown
         _show_cache_summary(
-            '.pre-commit-config.yaml', store, only_failing=True,
+            '.pre-commit-config.yaml', store,
+            filter_statuses={'fail'},
         )
     printed_failing = cap_out.get_bytes()
     assert b'fail.py' in printed_failing
@@ -715,8 +717,8 @@ def test_show_cache_summary_only_failing_hides_passing(
     assert b'NO' in printed_failing
 
 
-def test_show_cache_summary_only_failing_all_pass(cap_out, store, in_git_dir):
-    """--only-failing with all passing: no file lines but YES shown."""
+def test_show_cache_summary_filter_pass_only(cap_out, store, in_git_dir):
+    """--filter pass: only passing files shown."""
     import shlex
     import sys
     _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
@@ -749,11 +751,103 @@ def test_show_cache_summary_only_failing_all_pass(cap_out, store, in_git_dir):
             store.set_hook_result(hk, 'f.py', _file_hash('f.py'), 0)
 
         _show_cache_summary(
-            '.pre-commit-config.yaml', store, only_failing=True,
+            '.pre-commit-config.yaml', store,
+            filter_statuses={'pass'},
         )
     printed = cap_out.get_bytes()
-    assert b'f.py' not in printed
+    assert b'f.py' in printed
     assert b'YES' in printed
+
+
+def test_show_cache_summary_filter_unknown(cap_out, store, in_git_dir):
+    """--filter unknown: only unchecked files shown."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('cached.py', 'w') as fh:
+            fh.write('x = 1\n')
+        with open('pending.py', 'w') as fh:
+            fh.write('y = 2\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'cached.py', 'pending.py')
+        git_commit()
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            # Only cache cached.py; pending.py has no result → unknown
+            store.set_hook_result(hk, 'cached.py', _file_hash('cached.py'), 0)
+
+        # filter=unknown: only the uncached file shown
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store,
+            filter_statuses={'unknown'},
+        )
+    printed = cap_out.get_bytes()
+    assert b'pending.py' in printed
+    assert b'cached.py' not in printed
+
+
+def test_show_cache_summary_default_hides_unknown(cap_out, store, in_git_dir):
+    """Default filter (fail,pass) hides unknown entries."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('cached.py', 'w') as fh:
+            fh.write('x = 1\n')
+        with open('pending.py', 'w') as fh:
+            fh.write('y = 2\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'cached.py', 'pending.py')
+        git_commit()
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'cached.py', _file_hash('cached.py'), 0)
+
+        # Default filter: pending.py (unknown) should NOT appear
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store,
+            filter_statuses={'fail', 'pass'},
+        )
+    printed = cap_out.get_bytes()
+    assert b'pending.py' not in printed
+    assert b'cached.py' in printed
 
 
 # ---------------------------------------------------------------------------

@@ -190,7 +190,7 @@ def _show_cache_summary(
         config_file: str,
         store: Store,
         repo_root: str = '',
-        only_failing: bool = False,
+        filter_statuses: set[str] | None = None,
         files_mode: str = 'current',
         use_color: bool = False,
 ) -> None:
@@ -251,14 +251,17 @@ def _show_cache_summary(
             )
             if result == 0:
                 mark = format_color('pass', GREEN, use_color)
+                status_key = 'pass'
             elif result == 1:
                 mark = format_color('FAIL', RED, use_color)
+                status_key = 'fail'
                 all_pass = False
             else:
                 mark = format_color('?   ', YELLOW, use_color)
+                status_key = 'unknown'
                 all_pass = False
                 all_checked = False
-            if not only_failing or result != 0:
+            if filter_statuses is None or status_key in filter_statuses:
                 hook_lines.append(f'    [{mark}]  {f}')
 
         if hook_lines:
@@ -514,7 +517,7 @@ def _daemon_status(
         store: Store,
         config_file: str | None = None,
         toplevel: str = '',
-        only_failing: bool = False,
+        filter_statuses: set[str] | None = None,
         files_mode: str = 'current',
         use_color: bool = False,
 ) -> int:
@@ -575,7 +578,7 @@ def _daemon_status(
         output.write_line(f'Cache summary ({label}):')
         _show_cache_summary(
             config_file, store, repo_root=toplevel,
-            only_failing=only_failing, files_mode=files_mode,
+            filter_statuses=filter_statuses, files_mode=files_mode,
             use_color=use_color,
         )
 
@@ -641,11 +644,17 @@ def daemon(config_file: str, store: Store, args: argparse.Namespace) -> int:
     if subcommand == 'stop':
         return _daemon_stop(store, toplevel)
     elif subcommand == 'status':
+        raw = getattr(args, 'filter_statuses', 'fail,pass')
+        filter_statuses = {
+            s.strip().lower().replace('?', 'unknown')
+            for s in raw.split(',')
+            if s.strip()
+        }
         return _daemon_status(
             store,
             config_file=config_file,
             toplevel=toplevel,
-            only_failing=getattr(args, 'only_failing', False),
+            filter_statuses=filter_statuses,
             files_mode=getattr(args, 'files_mode', 'current'),
             use_color=getattr(args, 'color', False),
         )

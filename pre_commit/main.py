@@ -287,10 +287,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help='Limit to a specific file path (clear subcommand only).',
     )
     daemon_parser.add_argument(
-        '--only-failing', action='store_true', dest='only_failing',
+        '--filter', dest='filter_statuses', metavar='STATUSES',
+        default='fail,pass',
         help=(
-            'Show only failing entries '
-            '(status subcommand only).'
+            'Comma-separated list of statuses to show: '
+            'pass, fail, unknown (or ?). '
+            'Default: fail,pass (hides unknown entries). '
+            'Status subcommand only.'
         ),
     )
     daemon_parser.add_argument(
