@@ -277,6 +277,33 @@ class Store:
         except Exception:
             return None
 
+    def get_hook_results_bulk(
+            self,
+            hook_key: str,
+            file_paths: Sequence[str],
+            repo_root: str = '',
+    ) -> dict[str, tuple[str, int]]:
+        """Return {file_path: (file_hash, result)} for all cached entries.
+
+        Single query instead of one per file — avoids N connection open/closes
+        and N schema checks when displaying status for a large file set.
+        """
+        if not file_paths:
+            return {}
+        try:
+            with self.connect() as db:
+                self._create_hook_results_table(db)
+                placeholders = ','.join('?' * len(file_paths))
+                rows = db.execute(
+                    f'SELECT file_path, file_hash, result FROM hook_results '
+                    f'WHERE repo_root = ? AND hook_key = ? '
+                    f'AND file_path IN ({placeholders})',
+                    [repo_root, hook_key, *file_paths],
+                ).fetchall()
+                return {row[0]: (row[1], row[2]) for row in rows}
+        except Exception:
+            return {}
+
     def set_hook_result(
             self,
             hook_key: str,

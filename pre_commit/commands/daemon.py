@@ -236,19 +236,36 @@ def _show_cache_summary(
     all_pass = True
     all_checked = True
 
+    # Single Classifier instance — _types_for_file is cached on the instance
+    # so file type detection is done at most once per file across all hooks.
+    classifier = Classifier(checked_files)
+    # Lazy hash cache: only read files that are actually matched by some hook,
+    # avoiding a full scan of all tracked files up-front.
+    file_hashes: dict[str, str] = {}
+
     for hook in hooks:
-        classifier = Classifier(checked_files)
         hook_filenames = tuple(classifier.filenames_for_hook(hook))
         if not hook_filenames:
             continue
 
+        # Hash only newly-seen files for this hook
+        for f in hook_filenames:
+            if f not in file_hashes:
+                file_hashes[f] = _file_hash(f)
+
         hook_key = _compute_hook_key(hook)
+        # One DB query per hook instead of one per file
+        cached = store.get_hook_results_bulk(
+            hook_key, hook_filenames, repo_root=repo_root,
+        )
         hook_lines = []
         for f in hook_filenames:
-            fhash = _file_hash(f)
-            result = store.get_hook_result(
-                hook_key, f, fhash, repo_root=repo_root,
-            )
+            fhash = file_hashes[f]
+            cached_entry = cached.get(f)
+            if cached_entry is not None and cached_entry[0] == fhash:
+                result: int | None = cached_entry[1]
+            else:
+                result = None  # hash mismatch or never cached
             if result == 0:
                 mark = format_color('pass', GREEN, use_color)
                 status_key = 'pass'
