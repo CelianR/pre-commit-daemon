@@ -285,7 +285,7 @@ def _run_single_hook(
             time_before = time.monotonic()
             language = languages[hook.language]
             with language.in_env(hook.prefix, hook.language_version):
-                if run_filenames:
+                if run_filenames or not hook.pass_filenames:
                     retcode, out = language.run_hook(
                         hook.prefix,
                         hook.entry,
