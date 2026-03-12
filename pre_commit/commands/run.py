@@ -307,8 +307,16 @@ def _run_single_hook(
             # Files that need fixing: entry-failed files + pre-cached fails
             entry_failed = run_filenames if (retcode or files_modified) else ()
             fix_target = tuple(entry_failed) + cached_fail_filenames
+            # For pass_filenames=false hooks, fix_target is always empty but
+            # fix should still run when the hook failed.
+            no_filenames_fix = (
+                not hook.pass_filenames and
+                (retcode or files_modified) and
+                hook.fix and
+                not no_fix
+            )
 
-            if fix_target and hook.fix and not no_fix:
+            if (fix_target or no_filenames_fix) and hook.fix and not no_fix:
                 # Run fix on all failing files (entry-failed + cached-fail).
                 # Use the hook's language in_env (so language-installed tools
                 # like goimports are on PATH) but always execute via the
