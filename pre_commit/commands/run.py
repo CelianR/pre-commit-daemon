@@ -215,7 +215,7 @@ def _run_single_hook(
 
         run_filenames = filenames if hook.pass_filenames else ()
 
-        if store is not None and hook.pass_filenames and filenames and hook.cache:
+        if store is not None and filenames and hook.cache:
             hook_key = _compute_hook_key(hook)
             file_hashes = {f: _file_hash(f) for f in filenames}
             if not no_cache:
@@ -231,7 +231,12 @@ def _run_single_hook(
                 cached_fail_filenames = tuple(
                     f for f, r in file_cache.items() if r == 1
                 )
-                run_filenames = need_run
+                # For pass_filenames=true: only run on uncached files.
+                # For pass_filenames=false: hook always runs on all-or-nothing,
+                # so run_filenames stays () — but we still use need_run to
+                # decide whether to short-circuit below.
+                if hook.pass_filenames:
+                    run_filenames = need_run
 
                 if not need_run and not cached_fail_filenames:
                     # All files are cached-pass → short-circuit
@@ -370,9 +375,12 @@ def _run_single_hook(
                                 hook_key, f,
                                 file_hashes[f], 0, repo_root=repo_root,
                             )
-                elif run_filenames:
+                elif run_filenames or not hook.pass_filenames:
                     result_val = 0 if not (retcode or files_modified) else 1
-                    for f in run_filenames:
+                    write_filenames = (
+                        run_filenames if hook.pass_filenames else filenames
+                    )
+                    for f in write_filenames:
                         store.set_hook_result(  # type: ignore[union-attr]
                             hook_key, f,
                             file_hashes[f], result_val, repo_root=repo_root,

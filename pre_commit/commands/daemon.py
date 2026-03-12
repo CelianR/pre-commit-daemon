@@ -167,16 +167,15 @@ def _run_hooks_on_changed(
                     f'Hook {hook.id!r} → {result_str} '
                     f'({len(hook_filenames)} file(s))',
                 )
-            if hook.pass_filenames:
-                for f in hook_filenames:
-                    store.set_hook_result(
-                        hook_key, f, file_hashes.get(f, ''), result,
-                        repo_root=repo_root,
-                    )
-                if result == 1 and not hook.fix:
-                    store.set_hook_output(
-                        hook_key, run_out, repo_root=repo_root,
-                    )
+            for f in hook_filenames:
+                store.set_hook_result(
+                    hook_key, f, file_hashes.get(f, ''), result,
+                    repo_root=repo_root,
+                )
+            if result == 1 and not hook.fix:
+                store.set_hook_output(
+                    hook_key, run_out, repo_root=repo_root,
+                )
         except Exception as exc:
             if foreground:
                 _log(f'Error running hook {hook.id!r}: {exc}')
