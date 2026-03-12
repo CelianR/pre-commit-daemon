@@ -212,6 +212,7 @@ def _run_single_hook(
         file_hashes: dict[str, str] = {}
         all_cached = False
         cached_fail_filenames: tuple[str, ...] = ()
+        need_run: tuple[str, ...] = ()
 
         run_filenames = filenames if hook.pass_filenames else ()
 
@@ -290,7 +291,7 @@ def _run_single_hook(
             time_before = time.monotonic()
             language = languages[hook.language]
             with language.in_env(hook.prefix, hook.language_version):
-                if run_filenames or not hook.pass_filenames:
+                if run_filenames or (not hook.pass_filenames and (no_cache or need_run)):
                     retcode, out = language.run_hook(
                         hook.prefix,
                         hook.entry,
@@ -312,33 +313,40 @@ def _run_single_hook(
             # Files that need fixing: entry-failed files + pre-cached fails
             entry_failed = run_filenames if (retcode or files_modified) else ()
             fix_target = tuple(entry_failed) + cached_fail_filenames
-            # For pass_filenames=false hooks, fix_target is always empty but
-            # fix should still run when the hook failed.
-            no_filenames_fix = (
-                not hook.pass_filenames and
-                (retcode or files_modified) and
-                hook.fix and
-                not no_fix
+            # For pass_filenames=false: fix should run when hook failed OR when
+            # there are cached-fail files (fix_target is non-empty but has no
+            # meaning as file args — the fix command runs without filenames).
+            needs_fix = bool(fix_target) or (
+                not hook.pass_filenames and (retcode or files_modified)
             )
 
-            if (fix_target or no_filenames_fix) and hook.fix and not no_fix:
-                # Run fix on all failing files (entry-failed + cached-fail).
+            if needs_fix and hook.fix and not no_fix:
+                # Run fix command.  For pass_filenames=false hooks the fix is
+                # invoked with no filenames (same semantics as the entry).
                 # Use the hook's language in_env (so language-installed tools
                 # like goimports are on PATH) but always execute via the
                 # system runner — fix is a user-defined command, not a hook
                 # script resolved relative to the cloned repo.
+                fix_invocation_target = (
+                    fix_target if hook.pass_filenames else ()
+                )
                 with language.in_env(hook.prefix, hook.language_version):
                     fix_retcode, _ = languages['unsupported'].run_hook(
                         hook.prefix,
                         hook.fix,
                         [],
-                        fix_target,
+                        fix_invocation_target,
                         is_local=True,
                         require_serial=hook.require_serial,
                         color=use_color,
                     )
+                # After fix: stage the affected files.
+                # For pass_filenames=true use fix_target (specific failing
+                # files); for pass_filenames=false stage all matched files
+                # since the fix may have touched any of them.
+                stage_target = fix_target if hook.pass_filenames else filenames
                 if not fix_retcode:
-                    cmd_output_b('git', 'add', '--', *fix_target, check=False)
+                    cmd_output_b('git', 'add', '--', *stage_target, check=False)
                     diff_after = _get_diff()
                     print_color = color.YELLOW
                     status = 'Fixed'
