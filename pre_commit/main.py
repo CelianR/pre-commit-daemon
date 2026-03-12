@@ -13,6 +13,7 @@ from pre_commit.color import add_color_option
 from pre_commit.commands import hazmat
 from pre_commit.commands.autoupdate import autoupdate
 from pre_commit.commands.clean import clean
+from pre_commit.commands.daemon import daemon
 from pre_commit.commands.gc import gc
 from pre_commit.commands.hook_impl import hook_impl
 from pre_commit.commands.init_templatedir import init_templatedir
@@ -42,7 +43,7 @@ os.environ.pop('__PYVENV_LAUNCHER__', None)
 os.environ.pop('PYTHONEXECUTABLE', None)
 
 COMMANDS_NO_GIT = {
-    'clean', 'gc', 'hazmat', 'init-templatedir', 'sample-config',
+    'clean', 'daemon', 'gc', 'hazmat', 'init-templatedir', 'sample-config',
     'validate-config', 'validate-manifest',
 }
 
@@ -170,6 +171,10 @@ def _add_run_options(parser: argparse.ArgumentParser) -> None:
             'the rewrite'
         ),
     )
+    parser.add_argument(
+        '--no-fix', action='store_true',
+        help='Skip the fix command even when a hook specifies one.',
+    )
 
 
 def _adjust_args_and_chdir(args: argparse.Namespace) -> None:
@@ -243,6 +248,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     _add_cmd('clean', help='Clean out pre-commit files.')
+
+    daemon_parser = _add_cmd(
+        'daemon',
+        help='Watch files and run hooks in the background (caches results).',
+    )
+    _add_config_option(daemon_parser)
+    daemon_parser.add_argument(
+        'daemon_subcommand',
+        nargs='?',
+        choices=['start', 'stop', 'status'],
+        default='start',
+        help='start (default), stop, or status',
+    )
+    daemon_parser.add_argument(
+        '--interval', type=float, default=1.0,
+        metavar='SECONDS',
+        help='Polling interval in seconds (default: %(default)s)',
+    )
+    daemon_parser.add_argument(
+        '--foreground', action='store_true',
+        help='Run in the foreground instead of detaching (default: detach).',
+    )
 
     _add_cmd('gc', help='Clean unused cached repos.')
 
@@ -393,6 +420,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == 'clean':
             return clean(store)
+        elif args.command == 'daemon':
+            return daemon(args.config, store, args)
         elif args.command == 'gc':
             return gc(store)
         elif args.command == 'hazmat':

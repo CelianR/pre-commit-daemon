@@ -5,6 +5,7 @@ import logging
 import os.path
 import sqlite3
 import tempfile
+import time
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Sequence
@@ -233,3 +234,93 @@ class Store:
             # TODO: eventually remove this and only create in _create
             self._create_configs_table(db)
             db.execute('INSERT OR IGNORE INTO configs VALUES (?)', (path,))
+
+    def _create_hook_results_table(self, db: sqlite3.Connection) -> None:
+        # Migrate old schema (no repo_root column) — cache is safe to drop
+        try:
+            rows = db.execute('PRAGMA table_info(hook_results)')
+            cols = {row[1] for row in rows}
+            if cols and 'repo_root' not in cols:
+                db.execute('DROP TABLE hook_results')
+        except Exception:
+            pass
+        db.executescript(
+            'CREATE TABLE IF NOT EXISTS hook_results ('
+            '    repo_root  TEXT NOT NULL,'
+            '    hook_key   TEXT NOT NULL,'
+            '    file_path  TEXT NOT NULL,'
+            '    file_hash  TEXT NOT NULL,'
+            '    result     INTEGER NOT NULL,'
+            '    timestamp  REAL NOT NULL,'
+            '    PRIMARY KEY (repo_root, hook_key, file_path)'
+            ');',
+        )
+
+    def get_hook_result(
+            self,
+            hook_key: str,
+            file_path: str,
+            file_hash: str,
+            repo_root: str = '',
+    ) -> int | None:
+        """Return cached result (0=pass, 1=fail) or None on cache miss."""
+        try:
+            with self.connect() as db:
+                self._create_hook_results_table(db)
+                row = db.execute(
+                    'SELECT result FROM hook_results '
+                    'WHERE repo_root = ? AND hook_key = ? '
+                    'AND file_path = ? AND file_hash = ?',
+                    (repo_root, hook_key, file_path, file_hash),
+                ).fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
+
+    def set_hook_result(
+            self,
+            hook_key: str,
+            file_path: str,
+            file_hash: str,
+            result: int,
+            repo_root: str = '',
+    ) -> None:
+        """Cache the result (0=pass, 1=fail) for a hook+file+hash triple."""
+        if self.readonly:
+            return
+        try:
+            with self.connect() as db:
+                self._create_hook_results_table(db)
+                db.execute(
+                    'INSERT OR REPLACE INTO hook_results '
+                    '(repo_root, hook_key, file_path, '
+                    'file_hash, result, timestamp) '
+                    'VALUES (?, ?, ?, ?, ?, ?)',
+                    (
+                        repo_root, hook_key,
+                        file_path, file_hash,
+                        result, time.time(),
+                    ),
+                )
+        except Exception:
+            pass
+
+    def purge_stale_hook_results(
+            self,
+            hook_keys: set[str],
+            repo_root: str = '',
+    ) -> None:
+        """Remove all cached results for the given hook_keys in this repo."""
+        if self.readonly or not hook_keys:
+            return
+        try:
+            with self.connect() as db:
+                self._create_hook_results_table(db)
+                placeholders = ','.join('?' * len(hook_keys))
+                db.execute(
+                    f'DELETE FROM hook_results '
+                    f'WHERE repo_root = ? AND hook_key IN ({placeholders})',
+                    [repo_root] + list(hook_keys),
+                )
+        except Exception:
+            pass

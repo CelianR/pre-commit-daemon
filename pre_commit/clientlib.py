@@ -240,6 +240,7 @@ MANIFEST_HOOK_DICT = cfgv.Map(
     cfgv.Required('id', cfgv.check_string),
     cfgv.Required('name', cfgv.check_string),
     cfgv.Required('entry', cfgv.check_string),
+    cfgv.Optional('fix', cfgv.check_string, ''),
     LanguageMigrationRequired('language', cfgv.check_one_of(language_names)),
     cfgv.Optional('alias', cfgv.check_string, ''),
 
@@ -262,6 +263,7 @@ MANIFEST_HOOK_DICT = cfgv.Map(
     cfgv.Optional('require_serial', cfgv.check_bool, False),
     StagesMigration('stages', []),
     cfgv.Optional('verbose', cfgv.check_bool, False),
+    cfgv.Optional('daemon', cfgv.check_bool, True),
 )
 MANIFEST_SCHEMA = cfgv.Array(MANIFEST_HOOK_DICT)
 
@@ -517,6 +519,7 @@ CONFIG_SCHEMA = cfgv.Map(
     cfgv.Optional('files', check_string_regex, ''),
     cfgv.Optional('exclude', check_string_regex, '^$'),
     cfgv.Optional('fail_fast', cfgv.check_bool, False),
+    cfgv.Optional('daemon', cfgv.check_bool, True),
     cfgv.WarnAdditionalKeys(
         (
             'repos',
@@ -528,6 +531,7 @@ CONFIG_SCHEMA = cfgv.Map(
             'fail_fast',
             'minimum_pre_commit_version',
             'ci',
+            'daemon',
         ),
         warn_unknown_keys_root,
     ),

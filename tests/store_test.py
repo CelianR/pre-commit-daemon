@@ -253,6 +253,148 @@ def test_create_when_directory_exists_but_not_db(store):
     assert os.path.exists(store.db_path)
 
 
+# ---------------------------------------------------------------------------
+# hook_results cache
+# ---------------------------------------------------------------------------
+
+def test_hook_result_miss(store):
+    """Cache miss returns None for an entry that was never written."""
+    assert store.get_hook_result('k', 'f.py', 'abc') is None
+
+
+def test_hook_result_pass(store):
+    """Stored pass result (0) is returned on exact hit."""
+    store.set_hook_result('k', 'f.py', 'abc', 0)
+    assert store.get_hook_result('k', 'f.py', 'abc') == 0
+
+
+def test_hook_result_fail(store):
+    """Stored fail result (1) is returned on exact hit."""
+    store.set_hook_result('k', 'f.py', 'abc', 1)
+    assert store.get_hook_result('k', 'f.py', 'abc') == 1
+
+
+def test_hook_result_hash_mismatch(store):
+    """Cache miss when hash differs — file content changed."""
+    store.set_hook_result('k', 'f.py', 'old_hash', 0)
+    assert store.get_hook_result('k', 'f.py', 'new_hash') is None
+
+
+def test_hook_result_overwrite(store):
+    """Same (hook_key, file_path) with a new hash replaces the row."""
+    store.set_hook_result('k', 'f.py', 'h', 0)
+    store.set_hook_result('k', 'f.py', 'h', 1)
+    assert store.get_hook_result('k', 'f.py', 'h') == 1
+
+
+def test_hook_result_multiple_hooks_independent(store):
+    """Different hook_keys are stored independently."""
+    store.set_hook_result('hook-a', 'f.py', 'h', 0)
+    store.set_hook_result('hook-b', 'f.py', 'h', 1)
+    assert store.get_hook_result('hook-a', 'f.py', 'h') == 0
+    assert store.get_hook_result('hook-b', 'f.py', 'h') == 1
+
+
+def test_hook_result_multiple_files_independent(store):
+    """Different file paths under the same hook_key are independent."""
+    store.set_hook_result('k', 'a.py', 'h', 0)
+    store.set_hook_result('k', 'b.py', 'h', 1)
+    assert store.get_hook_result('k', 'a.py', 'h') == 0
+    assert store.get_hook_result('k', 'b.py', 'h') == 1
+
+
+def test_hook_result_persists_across_store_instances(tempdir_factory):
+    """Results survive across separate Store instances (same db file)."""
+    path = os.path.join(tempdir_factory.get(), '.pre-commit')
+    s1 = Store(path)
+    s1.set_hook_result('k', 'f.py', 'h', 0)
+
+    s2 = Store(path)
+    assert s2.get_hook_result('k', 'f.py', 'h') == 0
+
+
+def test_hook_result_readonly_store_is_noop(tempdir_factory):
+    """set_hook_result on a readonly store silently does nothing."""
+    path = os.path.join(tempdir_factory.get(), '.pre-commit')
+    store = Store(path)
+    store.readonly = True  # readonly is a plain instance attribute
+    store.set_hook_result('k', 'f.py', 'h', 0)
+    # Write was skipped → cache miss
+    assert store.get_hook_result('k', 'f.py', 'h') is None
+
+
+# ---------------------------------------------------------------------------
+# purge_stale_hook_results
+# ---------------------------------------------------------------------------
+
+def test_purge_stale_hook_results_removes_matching_keys(store):
+    store.set_hook_result('hook-a', 'f.py', 'h', 0)
+    store.set_hook_result('hook-b', 'f.py', 'h', 0)
+    store.purge_stale_hook_results({'hook-a'})
+    assert store.get_hook_result('hook-a', 'f.py', 'h') is None
+    assert store.get_hook_result('hook-b', 'f.py', 'h') == 0
+
+
+def test_purge_stale_hook_results_empty_set_is_noop(store):
+    store.set_hook_result('hook-a', 'f.py', 'h', 0)
+    store.purge_stale_hook_results(set())
+    assert store.get_hook_result('hook-a', 'f.py', 'h') == 0
+
+
+def test_purge_stale_hook_results_unknown_keys_ok(store):
+    """Purging keys that don't exist should not raise."""
+    store.purge_stale_hook_results({'nonexistent-key'})
+
+
+def test_purge_stale_hook_results_multiple_files(store):
+    store.set_hook_result('hook-a', 'a.py', 'h', 0)
+    store.set_hook_result('hook-a', 'b.py', 'h', 0)
+    store.set_hook_result('hook-b', 'a.py', 'h', 0)
+    store.purge_stale_hook_results({'hook-a'})
+    assert store.get_hook_result('hook-a', 'a.py', 'h') is None
+    assert store.get_hook_result('hook-a', 'b.py', 'h') is None
+    assert store.get_hook_result('hook-b', 'a.py', 'h') == 0
+
+
+# ---------------------------------------------------------------------------
+# repo_root isolation
+# ---------------------------------------------------------------------------
+
+def test_hook_result_isolated_by_repo_root(store):
+    """Same hook_key+file_path+hash in two repos are independent."""
+    store.set_hook_result('k', 'src/main.py', 'h', 0, repo_root='/repo/a')
+    # repo/b doesn't see repo/a's result
+    assert store.get_hook_result(
+        'k', 'src/main.py', 'h', repo_root='/repo/b',
+    ) is None
+    # repo/a still has its result
+    assert store.get_hook_result(
+        'k', 'src/main.py', 'h', repo_root='/repo/a',
+    ) == 0
+
+
+def test_hook_result_default_repo_root_is_isolated(store):
+    """Empty repo_root (default) is its own namespace, distinct from named."""
+    store.set_hook_result('k', 'f.py', 'h', 0, repo_root='')
+    assert store.get_hook_result(
+        'k', 'f.py', 'h', repo_root='/repo/a',
+    ) is None
+    assert store.get_hook_result('k', 'f.py', 'h', repo_root='') == 0
+
+
+def test_purge_stale_isolated_by_repo_root(store):
+    """purge_stale_hook_results only removes entries for the given repo."""
+    store.set_hook_result('hook-a', 'f.py', 'h', 0, repo_root='/repo/a')
+    store.set_hook_result('hook-a', 'f.py', 'h', 0, repo_root='/repo/b')
+    store.purge_stale_hook_results({'hook-a'}, repo_root='/repo/a')
+    assert store.get_hook_result(
+        'hook-a', 'f.py', 'h', repo_root='/repo/a',
+    ) is None
+    assert store.get_hook_result(
+        'hook-a', 'f.py', 'h', repo_root='/repo/b',
+    ) == 0
+
+
 def test_create_when_store_already_exists(store):
     # an assertion that this is idempotent and does not crash
     Store(store.directory)
