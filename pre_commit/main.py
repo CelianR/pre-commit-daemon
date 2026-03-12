@@ -175,6 +175,14 @@ def _add_run_options(parser: argparse.ArgumentParser) -> None:
         '--no-fix', action='store_true',
         help='Skip the fix command even when a hook specifies one.',
     )
+    parser.add_argument(
+        '--no-cache', action='store_true', dest='no_cache',
+        help=(
+            'Ignore cached hook results from the daemon; '
+            'run all hooks fresh. '
+            'Also honoured via PRE_COMMIT_NO_CACHE=1.'
+        ),
+    )
 
 
 def _adjust_args_and_chdir(args: argparse.Namespace) -> None:
@@ -257,9 +265,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     daemon_parser.add_argument(
         'daemon_subcommand',
         nargs='?',
-        choices=['start', 'stop', 'status'],
+        choices=['start', 'stop', 'status', 'clear'],
         default='start',
-        help='start (default), stop, or status',
+        help='start (default), stop, status, or clear',
     )
     daemon_parser.add_argument(
         '--interval', type=float, default=1.0,
@@ -269,6 +277,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     daemon_parser.add_argument(
         '--foreground', action='store_true',
         help='Run in the foreground instead of detaching (default: detach).',
+    )
+    daemon_parser.add_argument(
+        '--hook', dest='hook_id', metavar='HOOK_ID', default=None,
+        help='Limit to a specific hook id (clear subcommand only).',
+    )
+    daemon_parser.add_argument(
+        '--file', dest='file_path', metavar='FILE', default=None,
+        help='Limit to a specific file path (clear subcommand only).',
+    )
+    daemon_parser.add_argument(
+        '--only-failing', action='store_true', dest='only_failing',
+        help=(
+            'Show only failing entries '
+            '(status subcommand only).'
+        ),
+    )
+    daemon_parser.add_argument(
+        '--files',
+        choices=['current', 'staged'],
+        default='current',
+        dest='files_mode',
+        help=(
+            'Which files to check in status: '
+            'current (default, all tracked) or staged.'
+        ),
     )
 
     _add_cmd('gc', help='Clean unused cached repos.')

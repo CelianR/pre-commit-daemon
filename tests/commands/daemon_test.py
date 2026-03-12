@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 from pre_commit import git
+from pre_commit.commands.daemon import _daemon_clear
 from pre_commit.commands.daemon import _daemon_start
 from pre_commit.commands.daemon import _daemon_status
 from pre_commit.commands.daemon import _daemon_stop
@@ -217,6 +218,30 @@ def test_daemon_start_allowed_when_daemon_true_in_config(
     assert b'disabled' not in cap_out.get_bytes()
 
 
+def test_daemon_start_missing_config_returns_error(
+    cap_out, store, in_git_dir,
+):
+    """_daemon_start returns 1 with a clear message when config is absent."""
+    with cwd(str(in_git_dir)):
+        ret = _daemon_start('nonexistent-config.yaml', store, interval=1.0)
+    assert ret == 1
+    printed = cap_out.get_bytes()
+    assert b'not found' in printed
+    assert b'nonexistent-config.yaml' in printed
+
+
+def test_daemon_start_invalid_config_returns_error(
+    cap_out, store, in_git_dir,
+):
+    """_daemon_start returns 1 with a clear message when config is invalid."""
+    with cwd(str(in_git_dir)):
+        with open('.pre-commit-config.yaml', 'w') as fh:
+            fh.write('this: is: not: valid: yaml: [\n')
+        ret = _daemon_start('.pre-commit-config.yaml', store, interval=1.0)
+    assert ret == 1
+    assert b'Invalid config' in cap_out.get_bytes()
+
+
 def test_daemon_start_allowed_when_daemon_key_absent(
     cap_out, store, in_git_dir,
 ):
@@ -318,7 +343,9 @@ def test_files_differing_from_head_detects_staged(in_git_dir):
 def test_show_cache_summary_no_staged_files(cap_out, store, in_git_dir):
     """With no staged files, summary says 'No staged files'."""
     with cwd(str(in_git_dir)):
-        _show_cache_summary('.pre-commit-config.yaml', store)
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, files_mode='staged',
+        )
     assert b'No staged files' in cap_out.get_bytes()
 
 
@@ -357,7 +384,9 @@ def test_show_cache_summary_all_pass(cap_out, store, in_git_dir):
             fhash = _file_hash('f.py')
             store.set_hook_result(hk, 'f.py', fhash, 0)
 
-        _show_cache_summary('.pre-commit-config.yaml', store)
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, files_mode='staged',
+        )
 
     printed = cap_out.get_bytes()
     assert b'pass' in printed
@@ -397,7 +426,9 @@ def test_show_cache_summary_with_fail(cap_out, store, in_git_dir):
             fhash = _file_hash('f.py')
             store.set_hook_result(hk, 'f.py', fhash, 1)
 
-        _show_cache_summary('.pre-commit-config.yaml', store)
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, files_mode='staged',
+        )
 
     printed = cap_out.get_bytes()
     assert b'FAIL' in printed
@@ -428,7 +459,9 @@ def test_show_cache_summary_with_unchecked(cap_out, store, in_git_dir):
         cmd_output_b('git', 'add', 'f.py')
 
         # Do NOT seed any cache entry
-        _show_cache_summary('.pre-commit-config.yaml', store)
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, files_mode='staged',
+        )
 
     printed = cap_out.get_bytes()
     assert b'?' in printed
@@ -436,18 +469,18 @@ def test_show_cache_summary_with_unchecked(cap_out, store, in_git_dir):
 
 
 # ---------------------------------------------------------------------------
-# Per-hook daemon: false flag
+# Per-hook cache: false flag
 # ---------------------------------------------------------------------------
 
-def test_run_hooks_on_changed_skips_daemon_false_hooks(store):
-    """Hooks with daemon: false are skipped entirely by the daemon watcher."""
+def test_run_hooks_on_changed_skips_cache_false_hooks(store):
+    """Hooks with cache: false are skipped entirely by the daemon watcher."""
     from unittest import mock
     from pre_commit.commands.daemon import _run_hooks_on_changed
 
-    def _mock_hook(id_, daemon_enabled):
+    def _mock_hook(id_, cache_enabled):
         h = mock.Mock()
         h.id = id_
-        h.daemon = daemon_enabled
+        h.cache = cache_enabled
         h.pass_filenames = True
         h.files = ''
         h.exclude = '^$'
@@ -456,8 +489,8 @@ def test_run_hooks_on_changed_skips_daemon_false_hooks(store):
         h.exclude_types = []
         return h
 
-    hook_on = _mock_hook('on', daemon_enabled=True)
-    hook_off = _mock_hook('off', daemon_enabled=False)
+    hook_on = _mock_hook('on', cache_enabled=True)
+    hook_off = _mock_hook('off', cache_enabled=False)
 
     with mock.patch('pre_commit.commands.daemon.Classifier') as MockClassifier:
         instance = MockClassifier.return_value
@@ -475,8 +508,8 @@ def test_run_hooks_on_changed_skips_daemon_false_hooks(store):
         assert hook_off not in called_hooks
 
 
-def test_daemon_false_hook_config_is_valid():
-    """daemon: false is accepted as valid hook config (schema check)."""
+def test_cache_false_hook_config_is_valid():
+    """cache: false is accepted as valid hook config (schema check)."""
     from testing.fixtures import write_config
     import tempfile
     import os
@@ -490,7 +523,7 @@ def test_daemon_false_hook_config_is_valid():
                         'name': 'h',
                         'entry': 'true',
                         'language': 'system',
-                        'daemon': False,
+                        'cache': False,
                     }],
                 }],
             },
@@ -498,7 +531,7 @@ def test_daemon_false_hook_config_is_valid():
         from pre_commit.clientlib import load_config
         cfg = load_config(os.path.join(d, '.pre-commit-config.yaml'))
         hook_cfg = cfg['repos'][0]['hooks'][0]
-        assert hook_cfg['daemon'] is False
+        assert hook_cfg['cache'] is False
 
 
 # ---------------------------------------------------------------------------
@@ -621,3 +654,610 @@ def test_cache_result_isolated_between_repos(store, tempdir_factory):
             assert store.get_hook_result(
                 hk, 'f.py', fhash, repo_root=toplevel_a,
             ) == 0
+
+
+# ---------------------------------------------------------------------------
+# --only-failing filter
+# ---------------------------------------------------------------------------
+
+def test_show_cache_summary_only_failing_hides_passing(
+        cap_out, store, in_git_dir,
+):
+    """--only-failing: passing files are omitted, failing ones shown."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('pass.py', 'w') as fh:
+            fh.write('x = 1\n')
+        with open('fail.py', 'w') as fh:
+            fh.write('y = 2\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'pass.py', 'fail.py')
+        git_commit()  # commit so files appear in git ls-files
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'pass.py', _file_hash('pass.py'), 0)
+            store.set_hook_result(hk, 'fail.py', _file_hash('fail.py'), 1)
+
+        # Without filter: both shown
+        _show_cache_summary('.pre-commit-config.yaml', store)
+    printed_all = cap_out.get_bytes()
+    assert b'pass.py' in printed_all
+    assert b'fail.py' in printed_all
+
+    with cwd(str(in_git_dir)):
+        # With only_failing: only failing file shown
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, only_failing=True,
+        )
+    printed_failing = cap_out.get_bytes()
+    assert b'fail.py' in printed_failing
+    assert b'pass.py' not in printed_failing
+    assert b'NO' in printed_failing
+
+
+def test_show_cache_summary_only_failing_all_pass(cap_out, store, in_git_dir):
+    """--only-failing with all passing: no file lines but YES shown."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'f.py', _file_hash('f.py'), 0)
+
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, only_failing=True,
+        )
+    printed = cap_out.get_bytes()
+    assert b'f.py' not in printed
+    assert b'YES' in printed
+
+
+# ---------------------------------------------------------------------------
+# --files current (working-tree files)
+# ---------------------------------------------------------------------------
+
+def test_show_cache_summary_files_mode_current(cap_out, store, in_git_dir):
+    """files_mode=current uses all tracked (committed) working-tree files."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        # Commit the file so it appears in git ls-files
+        with open('tracked.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'tracked.py')
+        git_commit()
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(
+                hk, 'tracked.py', _file_hash('tracked.py'), 0,
+            )
+
+        # files_mode='current' should pick up the committed file
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, files_mode='current',
+        )
+
+    printed = cap_out.get_bytes()
+    assert b'tracked.py' in printed
+    assert b'YES' in printed
+
+
+def test_show_cache_summary_files_mode_staged_only_staged(
+        cap_out, store, in_git_dir,
+):
+    """files_mode=staged only checks git-staged files, not all tracked."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        # committed.py: committed but NOT staged → not shown in staged mode
+        with open('committed.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'committed.py')
+        git_commit()
+
+        # staged.py: staged (added to index) but not committed
+        with open('staged.py', 'w') as fh:
+            fh.write('y = 2\n')
+        cmd_output_b('git', 'add', 'staged.py')
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(
+                hk, 'staged.py', _file_hash('staged.py'), 0,
+            )
+
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, files_mode='staged',
+        )
+
+    printed = cap_out.get_bytes()
+    assert b'staged.py' in printed
+    assert b'committed.py' not in printed
+
+
+# ---------------------------------------------------------------------------
+# daemon: false hooks excluded from status
+# ---------------------------------------------------------------------------
+
+def test_show_cache_summary_excludes_daemon_false_hooks(
+        cap_out, store, in_git_dir,
+):
+    """Hooks with daemon: false are not shown in cache summary."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [
+                    {
+                        'id': 'shown', 'name': 'Shown Hook',
+                        'entry': _PASS, 'language': 'system',
+                        'cache': True,
+                    },
+                    {
+                        'id': 'hidden', 'name': 'Hidden Hook',
+                        'entry': _PASS, 'language': 'system',
+                        'cache': False,
+                    },
+                ],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        _show_cache_summary('.pre-commit-config.yaml', store)
+
+    printed = cap_out.get_bytes()
+    assert b'Shown Hook' in printed
+    assert b'Hidden Hook' not in printed
+
+
+# ---------------------------------------------------------------------------
+# daemon clear
+# ---------------------------------------------------------------------------
+
+def _write_hook_config(directory, entry):
+    """Write a minimal local hook config to *directory*."""
+    write_config(
+        directory, {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': entry, 'language': 'system',
+                }],
+            }],
+        },
+    )
+
+
+def test_daemon_clear_removes_all_results(cap_out, store, in_git_dir):
+    """clear with no flags wipes all cached results for the repo."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    _write_hook_config('.', _PASS)
+    with cwd(str(in_git_dir)):
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        import os
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'a.py', 'h', 0, repo_root=os.getcwd())
+            store.set_hook_result(hk, 'b.py', 'h', 1, repo_root=os.getcwd())
+
+        ret = _daemon_clear(
+            '.pre-commit-config.yaml', store, toplevel=os.getcwd(),
+        )
+
+    assert ret == 0
+    printed = cap_out.get_bytes()
+    assert b'Cleared' in printed
+    assert b'2' in printed
+
+
+def test_daemon_clear_by_hook_id(cap_out, store, in_git_dir):
+    """clear --hook only removes results for that hook."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    _write_hook_config('.', _PASS)
+    with cwd(str(in_git_dir)):
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        import os
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        repo_root = os.getcwd()
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'f.py', 'h', 1, repo_root=repo_root)
+
+        ret = _daemon_clear(
+            '.pre-commit-config.yaml', store,
+            toplevel=repo_root, hook_id='checker',
+        )
+        assert ret == 0
+        # After clear, result is gone
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            assert store.get_hook_result(
+                hk, 'f.py', 'h', repo_root=repo_root,
+            ) is None
+
+    assert b'checker' in cap_out.get_bytes()
+
+
+def test_daemon_clear_by_file(cap_out, store, in_git_dir):
+    """clear --file removes only results for that file."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    _write_hook_config('.', _PASS)
+    with cwd(str(in_git_dir)):
+        from pre_commit.commands.run import _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        import os
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        repo_root = os.getcwd()
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'a.py', 'h', 0, repo_root=repo_root)
+            store.set_hook_result(hk, 'b.py', 'h', 1, repo_root=repo_root)
+
+        ret = _daemon_clear(
+            '.pre-commit-config.yaml', store,
+            toplevel=repo_root, file_path='a.py',
+        )
+        assert ret == 0
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            # a.py cleared
+            assert store.get_hook_result(
+                hk, 'a.py', 'h', repo_root=repo_root,
+            ) is None
+            # b.py untouched
+            assert store.get_hook_result(
+                hk, 'b.py', 'h', repo_root=repo_root,
+            ) == 1
+
+    assert b'a.py' in cap_out.get_bytes()
+
+
+def test_daemon_clear_unknown_hook_id_returns_error(
+        cap_out, store, in_git_dir,
+):
+    """clear --hook <unknown> prints an error and returns 1."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    _write_hook_config('.', _PASS)
+    with cwd(str(in_git_dir)):
+        ret = _daemon_clear(
+            '.pre-commit-config.yaml', store,
+            toplevel=str(in_git_dir), hook_id='no-such-hook',
+        )
+
+    assert ret == 1
+    assert b'no-such-hook' in cap_out.get_bytes()
+
+
+def test_daemon_clear_also_clears_outputs(cap_out, store, in_git_dir):
+    """clear removes hook_run_outputs as well as hook_results."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    _write_hook_config('.', _PASS)
+    with cwd(str(in_git_dir)):
+        from pre_commit.commands.run import _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        import os
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        repo_root = os.getcwd()
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'f.py', 'h', 1, repo_root=repo_root)
+            store.set_hook_output(hk, b'error!', repo_root=repo_root)
+
+        _daemon_clear(
+            '.pre-commit-config.yaml', store, toplevel=repo_root,
+        )
+
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            assert store.get_hook_output(hk, repo_root=repo_root) is None
+
+
+# ---------------------------------------------------------------------------
+# Colors in daemon status
+# ---------------------------------------------------------------------------
+
+def test_daemon_status_not_running_colored(cap_out, store):
+    """'Daemon is not running' appears with RED color escape when use_color."""
+    from pre_commit.color import RED, NORMAL
+    ret = _daemon_status(store, use_color=True)
+    assert ret == 1
+    printed = cap_out.get_bytes()
+    assert RED.encode() in printed
+    assert NORMAL.encode() in printed
+    assert b'not running' in printed
+
+
+def test_daemon_status_running_colored(cap_out, store):
+    """'Daemon is running' appears with GREEN color escape when use_color."""
+    from pre_commit.color import GREEN, NORMAL
+    _write_pid(store, os.getpid())
+    ret = _daemon_status(store, use_color=True)
+    assert ret == 0
+    printed = cap_out.get_bytes()
+    assert GREEN.encode() in printed
+    assert NORMAL.encode() in printed
+    assert b'running' in printed
+
+
+def test_daemon_status_no_color_by_default(cap_out, store):
+    """No ANSI escapes when use_color=False (default)."""
+    _write_pid(store, os.getpid())
+    _daemon_status(store, use_color=False)
+    printed = cap_out.get_bytes()
+    assert b'\033[' not in printed
+
+
+def test_show_cache_summary_pass_colored(cap_out, store, in_git_dir):
+    """Cached-pass files show GREEN escape when use_color=True."""
+    import shlex
+    import sys
+    from pre_commit.color import GREEN, NORMAL
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'f.py', _file_hash('f.py'), 0)
+
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, use_color=True,
+        )
+
+    printed = cap_out.get_bytes()
+    assert GREEN.encode() in printed
+    assert NORMAL.encode() in printed
+    assert b'pass' in printed
+    assert b'YES' in printed
+
+
+def test_show_cache_summary_fail_colored(cap_out, store, in_git_dir):
+    """Cached-fail files show RED escape when use_color=True."""
+    import shlex
+    import sys
+    from pre_commit.color import RED, NORMAL
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.clientlib import load_config
+        from pre_commit.repository import all_hooks
+        cfg = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            store.set_hook_result(hk, 'f.py', _file_hash('f.py'), 1)
+
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, use_color=True,
+        )
+
+    printed = cap_out.get_bytes()
+    assert RED.encode() in printed
+    assert b'FAIL' in printed
+    assert b'NO' in printed
+
+
+def test_show_cache_summary_unknown_colored(cap_out, store, in_git_dir):
+    """Unchecked files show YELLOW escape when use_color=True."""
+    import shlex
+    import sys
+    from pre_commit.color import YELLOW, NORMAL
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        # No cache entry → unknown
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, use_color=True,
+        )
+
+    printed = cap_out.get_bytes()
+    assert YELLOW.encode() in printed
+    assert b'UNKNOWN' in printed
+
+
+def test_show_cache_summary_no_color_no_escapes(cap_out, store, in_git_dir):
+    """No ANSI escapes when use_color=False."""
+    import shlex
+    import sys
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        from pre_commit.util import cmd_output_b
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        _show_cache_summary(
+            '.pre-commit-config.yaml', store, use_color=False,
+        )
+
+    printed = cap_out.get_bytes()
+    assert b'\033[' not in printed

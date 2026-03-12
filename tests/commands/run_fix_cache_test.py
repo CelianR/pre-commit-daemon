@@ -9,8 +9,11 @@ import pre_commit.constants as C
 from pre_commit.commands.run import _compute_hook_key
 from pre_commit.commands.run import _file_hash
 from pre_commit.commands.run import run
+from testing.fixtures import git_dir
 from testing.fixtures import write_config
+from testing.util import cmd_output_mocked_pre_commit_home
 from testing.util import cwd
+from testing.util import git_commit
 from testing.util import run_opts
 
 
@@ -41,6 +44,11 @@ def _local_hook(*, id, name, entry, language='system', fix='', **extra):
 _PY = shlex.quote(sys.executable)
 _FAIL = f'{_PY} -c "import sys; sys.exit(1)"'
 _PASS = f'{_PY} -c "pass"'
+_HOOK_ERR = 'cached-fail-output'
+_FAIL_OUT = (
+    f'{_PY} -c '
+    f'"import sys; print({_HOOK_ERR!r}); sys.exit(1)"'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +552,235 @@ def test_cache_uses_working_tree_hash_not_staged(cap_out, store, in_git_dir):
     ret3, printed3 = _do_run(cap_out, store, str(in_git_dir), args)
     assert ret3 == 0
     assert b'(cached)' not in printed3  # cache invalidated by on-disk change
+
+
+# ---------------------------------------------------------------------------
+# Cached-fail output display
+# ---------------------------------------------------------------------------
+
+def test_cached_fail_output_displayed_on_second_run(
+        cap_out, store, in_git_dir,
+):
+    """Cached fail: stored hook output is shown on subsequent runs."""
+    write_config(
+        '.', _local_hook(
+            id='checker', name='Checker', entry=_FAIL_OUT,
+        ),
+    )
+    with open('test.py', 'w') as fh:
+        fh.write('x = 1\n')
+    args = run_opts(files=('test.py',))
+
+    # First run: hook fails and output is stored in cache
+    ret1, printed1 = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret1 == 1
+    assert _HOOK_ERR.encode() in printed1
+
+    # Second run: cached fail — stored output must be shown
+    ret2, printed2 = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret2 == 1
+    assert b'(cached)' in printed2
+    assert _HOOK_ERR.encode() in printed2
+
+
+def test_cached_fail_output_not_shown_when_hook_has_fix(
+        cap_out, store, in_git_dir,
+):
+    """Output is NOT stored/shown when hook has a fix entry."""
+    write_config(
+        '.', _local_hook(
+            id='checker', name='Checker',
+            entry=_FAIL_OUT, fix=_PASS,
+        ),
+    )
+    with open('test.py', 'w') as fh:
+        fh.write('x = 1\n')
+    args = run_opts(files=('test.py',))
+
+    # First run: hook fails but fix succeeds → Fixed, output not cached
+    ret1, printed1 = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret1 == 0
+    assert b'Fixed' in printed1
+
+    # Verify no output was stored (fix runs → no output cache)
+    from pre_commit.commands.run import _compute_hook_key
+    from pre_commit.clientlib import load_config
+    from pre_commit.repository import all_hooks
+    import os
+    with cwd(str(in_git_dir)):
+        cfg = load_config(C.CONFIG_FILE)
+        hooks = list(all_hooks(cfg, store))
+        for hook in hooks:
+            hk = _compute_hook_key(hook)
+            assert store.get_hook_output(
+                hk, repo_root=os.getcwd(),
+            ) is None
+
+
+# ---------------------------------------------------------------------------
+# --no-cache flag / PRE_COMMIT_NO_CACHE env var
+# ---------------------------------------------------------------------------
+
+def test_no_cache_bypasses_cached_pass(cap_out, store, in_git_dir):
+    """--no-cache: cached-pass files are run again (no (cached) shown)."""
+    write_config(
+        '.', _local_hook(id='checker', name='Checker', entry=_PASS),
+    )
+    with open('test.py', 'w') as fh:
+        fh.write('x = 1\n')
+    args = run_opts(files=('test.py',))
+
+    # First run populates cache
+    ret1, _ = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret1 == 0
+
+    # Second run: cache hit normally
+    ret2, printed2 = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret2 == 0
+    assert b'(cached)' in printed2
+
+    # Third run with --no-cache: must run fresh, no (cached) label
+    no_cache_args = run_opts(files=('test.py',), no_cache=True)
+    ret3, printed3 = _do_run(cap_out, store, str(in_git_dir), no_cache_args)
+    assert ret3 == 0
+    assert b'(cached)' not in printed3
+    assert b'Passed' in printed3
+
+
+def test_no_cache_bypasses_cached_fail(cap_out, store, in_git_dir):
+    """--no-cache: cached-fail files are run again (entry actually runs)."""
+    write_config(
+        '.', _local_hook(id='checker', name='Checker', entry=_FAIL),
+    )
+    with open('test.py', 'w') as fh:
+        fh.write('x = 1\n')
+    args = run_opts(files=('test.py',))
+
+    # First run: fails and populates cache
+    ret1, _ = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret1 == 1
+
+    # Second run: cached fail short-circuits
+    ret2, printed2 = _do_run(cap_out, store, str(in_git_dir), args)
+    assert ret2 == 1
+    assert b'(cached)' in printed2
+
+    # Third run with --no-cache: hook runs fresh, no (cached) label
+    no_cache_args = run_opts(files=('test.py',), no_cache=True)
+    ret3, printed3 = _do_run(cap_out, store, str(in_git_dir), no_cache_args)
+    assert ret3 == 1
+    assert b'(cached)' not in printed3
+
+
+def test_no_cache_still_writes_results(cap_out, store, in_git_dir):
+    """--no-cache re-runs hooks and writes fresh results to cache."""
+    write_config(
+        '.', _local_hook(id='checker', name='Checker', entry=_PASS),
+    )
+    with open('test.py', 'w') as fh:
+        fh.write('x = 1\n')
+
+    no_cache_args = run_opts(files=('test.py',), no_cache=True)
+    ret, _ = _do_run(cap_out, store, str(in_git_dir), no_cache_args)
+    assert ret == 0
+
+    # Cache must have been written by the --no-cache run
+    import os
+    from pre_commit.clientlib import load_config
+    from pre_commit.repository import all_hooks
+    with cwd(str(in_git_dir)):
+        cfg = load_config(C.CONFIG_FILE)
+        for hook in all_hooks(cfg, store):
+            hk = _compute_hook_key(hook)
+            result = store.get_hook_result(
+                hk, 'test.py', _file_hash(
+                    os.path.join(str(in_git_dir), 'test.py'),
+                ),
+                repo_root=str(in_git_dir),
+            )
+            assert result == 0
+
+
+def test_no_cache_env_var(cap_out, store, in_git_dir):
+    """PRE_COMMIT_NO_CACHE=1 has the same effect as --no-cache."""
+    write_config(
+        '.', _local_hook(id='checker', name='Checker', entry=_PASS),
+    )
+    with open('test.py', 'w') as fh:
+        fh.write('x = 1\n')
+    args = run_opts(files=('test.py',))
+
+    # Populate cache
+    _do_run(cap_out, store, str(in_git_dir), args)
+
+    # Normal second run hits cache
+    _, printed2 = _do_run(cap_out, store, str(in_git_dir), args)
+    assert b'(cached)' in printed2
+
+    # With env var set: runs fresh
+    from unittest import mock
+    import os
+    with cwd(str(in_git_dir)):
+        with mock.patch.dict(os.environ, {'PRE_COMMIT_NO_CACHE': '1'}):
+            ret3 = run(C.CONFIG_FILE, store, args)
+    printed3 = cap_out.get_bytes()
+    assert ret3 == 0
+    assert b'(cached)' not in printed3
+    assert b'Passed' in printed3
+
+
+# ---------------------------------------------------------------------------
+# fix override for remote (non-local) hooks
+# ---------------------------------------------------------------------------
+
+def test_fix_can_be_overridden_for_remote_hook(
+        cap_out, store, in_git_dir, tempdir_factory,
+):
+    """fix: can be specified in config for a remote hook that lacks it.
+
+    The merge in repository._hook() applies config values on top of the
+    manifest, so fix: is a valid per-hook override even for cloned repos.
+    """
+    from pre_commit import git
+    from pre_commit.util import cmd_output_b
+    from pre_commit.yaml import yaml_dump
+
+    # Build a minimal "remote" repo with a failing hook (no fix in manifest)
+    remote = git_dir(tempdir_factory)
+    hook_entry = f'{_PY} -c "import sys; sys.exit(1)"'
+    manifest = [{
+        'id': 'remote-fail',
+        'name': 'Remote Failing Hook',
+        'entry': hook_entry,
+        'language': 'system',
+        'files': r'\.py$',
+    }]
+    manifest_path = f'{remote}/.pre-commit-hooks.yaml'
+    with open(manifest_path, 'w') as fh:
+        fh.write(yaml_dump(manifest))
+    cmd_output_b('git', 'add', '.', cwd=remote)
+    git_commit(cwd=remote)
+    remote_rev = git.head_rev(remote)
+
+    # Local repo: reference remote hook and add fix: override locally
+    with cwd(str(in_git_dir)):
+        write_config(
+            '.', {
+                'repos': [{
+                    'repo': f'file://{remote}',
+                    'rev': remote_rev,
+                    'hooks': [{
+                        'id': 'remote-fail',
+                        'fix': _PASS,   # override: remote manifest has no fix
+                    }],
+                }],
+            },
+        )
+        open('test.py', 'w').close()
+
+        ret = run(C.CONFIG_FILE, store, run_opts(files=('test.py',)))
+
+    printed = cap_out.get_bytes()
+    assert ret == 0
+    assert b'Fixed' in printed
+    assert b'Failed' not in printed

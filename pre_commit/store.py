@@ -324,3 +324,108 @@ class Store:
                 )
         except Exception:
             pass
+
+    def clear_hook_results(
+            self,
+            repo_root: str = '',
+            hook_keys: set[str] | None = None,
+            file_path: str | None = None,
+    ) -> int:
+        """Delete cached results; returns number of rows deleted."""
+        if self.readonly:
+            return 0
+        if hook_keys is not None and not hook_keys:
+            return 0
+        try:
+            with self.connect() as db:
+                self._create_hook_results_table(db)
+                base = 'DELETE FROM hook_results WHERE repo_root = ?'
+                params: list[object] = [repo_root]
+                if hook_keys is not None:
+                    ph = ','.join('?' * len(hook_keys))
+                    base += f' AND hook_key IN ({ph})'
+                    params.extend(hook_keys)
+                if file_path is not None:
+                    base += ' AND file_path = ?'
+                    params.append(file_path)
+                cur = db.execute(base, params)
+                return cur.rowcount
+        except Exception:
+            return 0
+
+    def clear_hook_outputs(
+            self,
+            repo_root: str = '',
+            hook_keys: set[str] | None = None,
+    ) -> None:
+        """Delete stored hook outputs."""
+        if self.readonly:
+            return
+        if hook_keys is not None and not hook_keys:
+            return
+        try:
+            with self.connect() as db:
+                self._create_hook_run_outputs_table(db)
+                base = (
+                    'DELETE FROM hook_run_outputs WHERE repo_root = ?'
+                )
+                params2: list[object] = [repo_root]
+                if hook_keys is not None:
+                    ph = ','.join('?' * len(hook_keys))
+                    base += f' AND hook_key IN ({ph})'
+                    params2.extend(hook_keys)
+                db.execute(base, params2)
+        except Exception:
+            pass
+
+    def _create_hook_run_outputs_table(
+            self, db: sqlite3.Connection,
+    ) -> None:
+        db.executescript(
+            'CREATE TABLE IF NOT EXISTS hook_run_outputs ('
+            '    repo_root TEXT NOT NULL,'
+            '    hook_key  TEXT NOT NULL,'
+            '    output    BLOB NOT NULL,'
+            '    timestamp REAL NOT NULL,'
+            '    PRIMARY KEY (repo_root, hook_key)'
+            ');',
+        )
+
+    def get_hook_output(
+            self,
+            hook_key: str,
+            repo_root: str = '',
+    ) -> bytes | None:
+        """Return stored output from the last failing run, or None."""
+        try:
+            with self.connect() as db:
+                self._create_hook_run_outputs_table(db)
+                row = db.execute(
+                    'SELECT output FROM hook_run_outputs '
+                    'WHERE repo_root = ? AND hook_key = ?',
+                    (repo_root, hook_key),
+                ).fetchone()
+                return bytes(row[0]) if row else None
+        except Exception:
+            return None
+
+    def set_hook_output(
+            self,
+            hook_key: str,
+            output: bytes,
+            repo_root: str = '',
+    ) -> None:
+        """Store output from the last failing hook run."""
+        if self.readonly:
+            return
+        try:
+            with self.connect() as db:
+                self._create_hook_run_outputs_table(db)
+                db.execute(
+                    'INSERT OR REPLACE INTO hook_run_outputs '
+                    '(repo_root, hook_key, output, timestamp) '
+                    'VALUES (?, ?, ?, ?)',
+                    (repo_root, hook_key, output, time.time()),
+                )
+        except Exception:
+            pass

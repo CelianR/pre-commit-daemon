@@ -171,6 +171,7 @@ def _run_single_hook(
         store: Store | None = None,
         no_fix: bool = False,
         repo_root: str = '',
+        no_cache: bool = False,
 ) -> tuple[bool, bytes]:
     filenames = tuple(classifier.filenames_for_hook(hook))
 
@@ -214,61 +215,68 @@ def _run_single_hook(
 
         run_filenames = filenames if hook.pass_filenames else ()
 
-        if store is not None and hook.pass_filenames and filenames:
+        if store is not None and hook.pass_filenames and filenames and hook.cache:
             hook_key = _compute_hook_key(hook)
             file_hashes = {f: _file_hash(f) for f in filenames}
-            file_cache = {
-                f: store.get_hook_result(
-                    hook_key, f, file_hashes[f], repo_root=repo_root,
+            if not no_cache:
+                file_cache = {
+                    f: store.get_hook_result(
+                        hook_key, f, file_hashes[f], repo_root=repo_root,
+                    )
+                    for f in filenames
+                }
+                need_run = tuple(
+                    f for f, r in file_cache.items() if r is None
                 )
-                for f in filenames
-            }
-            need_run = tuple(f for f, r in file_cache.items() if r is None)
-            cached_fail_filenames = tuple(
-                f for f, r in file_cache.items() if r == 1
-            )
-            run_filenames = need_run
+                cached_fail_filenames = tuple(
+                    f for f, r in file_cache.items() if r == 1
+                )
+                run_filenames = need_run
 
-            if not need_run and not cached_fail_filenames:
-                # All files are cached-pass → short-circuit
-                all_cached = True
-                output.write(
-                    _full_msg(
-                        start=hook.name,
-                        postfix=CACHED,
-                        end_msg='Passed',
-                        end_color=color.GREEN,
-                        use_color=use_color,
-                        cols=cols,
-                    ),
-                )
-                duration = None
-                retcode = 0
-                diff_after = diff_before
-                files_modified = False
-                out = b''
-            elif (
-                    not need_run and
-                    cached_fail_filenames and
-                    (no_fix or not hook.fix)
-            ):
-                # All fail-cached, no fix available → short-circuit as Failed
-                all_cached = True
-                output.write(
-                    _full_msg(
-                        start=hook.name,
-                        postfix=CACHED,
-                        end_msg='Failed',
-                        end_color=color.RED,
-                        use_color=use_color,
-                        cols=cols,
-                    ),
-                )
-                duration = None
-                retcode = 1
-                diff_after = diff_before
-                files_modified = False
-                out = b''
+                if not need_run and not cached_fail_filenames:
+                    # All files are cached-pass → short-circuit
+                    all_cached = True
+                    output.write(
+                        _full_msg(
+                            start=hook.name,
+                            postfix=CACHED,
+                            end_msg='Passed',
+                            end_color=color.GREEN,
+                            use_color=use_color,
+                            cols=cols,
+                        ),
+                    )
+                    duration = None
+                    retcode = 0
+                    diff_after = diff_before
+                    files_modified = False
+                    out = b''
+                elif (
+                        not need_run and
+                        cached_fail_filenames and
+                        (no_fix or not hook.fix)
+                ):
+                    # All fail-cached, no fix → short-circuit as Failed
+                    all_cached = True
+                    output.write(
+                        _full_msg(
+                            start=hook.name,
+                            postfix=CACHED,
+                            end_msg='Failed',
+                            end_color=color.RED,
+                            use_color=use_color,
+                            cols=cols,
+                        ),
+                    )
+                    duration = None
+                    retcode = 1
+                    diff_after = diff_before
+                    files_modified = False
+                    out = (
+                        store.get_hook_output(
+                            hook_key, repo_root=repo_root,
+                        ) or b''
+                    )
 
         if not all_cached:
             # print hook and dots first in case the hook takes a while to run
@@ -301,14 +309,18 @@ def _run_single_hook(
             fix_target = tuple(entry_failed) + cached_fail_filenames
 
             if fix_target and hook.fix and not no_fix:
-                # Run fix on all failing files (entry-failed + cached-fail)
+                # Run fix on all failing files (entry-failed + cached-fail).
+                # Use the hook's language in_env (so language-installed tools
+                # like goimports are on PATH) but always execute via the
+                # system runner — fix is a user-defined command, not a hook
+                # script resolved relative to the cloned repo.
                 with language.in_env(hook.prefix, hook.language_version):
-                    fix_retcode, _ = language.run_hook(
+                    fix_retcode, _ = languages['unsupported'].run_hook(
                         hook.prefix,
                         hook.fix,
                         [],
                         fix_target,
-                        is_local=hook.src == 'local',
+                        is_local=True,
                         require_serial=hook.require_serial,
                         color=use_color,
                     )
@@ -357,6 +369,11 @@ def _run_single_hook(
                             hook_key, f,
                             file_hashes[f], result_val, repo_root=repo_root,
                         )
+                # Store hook output when it failed (no fix)
+                if status == 'Failed' and not hook.fix:
+                    store.set_hook_output(  # type: ignore[union-attr]
+                        hook_key, out, repo_root=repo_root,
+                    )
 
     if verbose or hook.verbose or retcode or files_modified:
         _subtle_line(f'- hook id: {hook.id}', use_color)
@@ -431,6 +448,7 @@ def _run_hooks(
         store: Store | None = None,
         no_fix: bool = False,
         repo_root: str = '',
+        no_cache: bool = False,
 ) -> int:
     """Actually run the hooks."""
     cols = _compute_cols(hooks)
@@ -444,6 +462,7 @@ def _run_hooks(
             classifier, hook, skips, cols, prior_diff,
             verbose=args.verbose, use_color=args.color,
             store=store, no_fix=no_fix, repo_root=repo_root,
+            no_cache=no_cache,
         )
         retval |= current_retval
         fail_fast = (config['fail_fast'] or hook.fail_fast or args.fail_fast)
@@ -590,11 +609,16 @@ def run(
         ]
         install_hook_envs(to_install, store)
 
+        no_cache = (
+            getattr(args, 'no_cache', False) or
+            bool(environ.get('PRE_COMMIT_NO_CACHE'))
+        )
         return _run_hooks(
             config, hooks, skips, args,
             store=store,
             no_fix=getattr(args, 'no_fix', False),
             repo_root=os.getcwd(),
+            no_cache=no_cache,
         )
 
     # https://github.com/python/mypy/issues/7726

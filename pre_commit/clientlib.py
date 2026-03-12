@@ -263,7 +263,7 @@ MANIFEST_HOOK_DICT = cfgv.Map(
     cfgv.Optional('require_serial', cfgv.check_bool, False),
     StagesMigration('stages', []),
     cfgv.Optional('verbose', cfgv.check_bool, False),
-    cfgv.Optional('daemon', cfgv.check_bool, True),
+    cfgv.Optional('cache', cfgv.check_bool, True),
 )
 MANIFEST_SCHEMA = cfgv.Array(MANIFEST_HOOK_DICT)
 

@@ -36,7 +36,7 @@ class Hook(NamedTuple):
     require_serial: bool
     stages: Sequence[str]
     verbose: bool
-    daemon: bool
+    cache: bool
 
     @property
     def install_key(self) -> tuple[Prefix, str, str, tuple[str, ...]]:

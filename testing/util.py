@@ -58,6 +58,7 @@ def run_opts(
         is_squash_merge='',
         rewrite_command='',
         no_fix=False,
+        no_cache=False,
 ):
     # These are mutually exclusive
     assert not (all_files and files)
@@ -85,6 +86,7 @@ def run_opts(
         is_squash_merge=is_squash_merge,
         rewrite_command=rewrite_command,
         no_fix=no_fix,
+        no_cache=no_cache,
     )
 
 

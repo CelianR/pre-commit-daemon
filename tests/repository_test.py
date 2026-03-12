@@ -449,7 +449,7 @@ def test_manifest_hooks(tempdir_factory, store):
         verbose=False,
         fail_fast=False,
         fix='',
-        daemon=True,
+        cache=True,
     )
 
 

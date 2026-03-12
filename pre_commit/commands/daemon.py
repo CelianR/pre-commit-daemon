@@ -12,6 +12,11 @@ from typing import Any
 from pre_commit import git
 from pre_commit import output
 from pre_commit.clientlib import load_config
+from pre_commit.color import format_color
+from pre_commit.color import GREEN
+from pre_commit.color import RED
+from pre_commit.color import SUBTLE
+from pre_commit.color import YELLOW
 from pre_commit.commands.run import _compute_hook_key
 from pre_commit.commands.run import _file_hash
 from pre_commit.commands.run import Classifier
@@ -128,7 +133,7 @@ def _run_hooks_on_changed(
 
     classifier = Classifier(changed)
     for hook in hooks:
-        if not hook.daemon:
+        if not hook.cache:
             continue
         hook_filenames = tuple(classifier.filenames_for_hook(hook))
         if not hook_filenames:
@@ -146,7 +151,7 @@ def _run_hooks_on_changed(
         try:
             language = languages[hook.language]
             with language.in_env(hook.prefix, hook.language_version):
-                retcode, _ = language.run_hook(
+                retcode, run_out = language.run_hook(
                     hook.prefix,
                     hook.entry,
                     hook.args,
@@ -168,6 +173,10 @@ def _run_hooks_on_changed(
                         hook_key, f, file_hashes.get(f, ''), result,
                         repo_root=repo_root,
                     )
+                if result == 1 and not hook.fix:
+                    store.set_hook_output(
+                        hook_key, run_out, repo_root=repo_root,
+                    )
         except Exception as exc:
             if foreground:
                 _log(f'Error running hook {hook.id!r}: {exc}')
@@ -181,31 +190,45 @@ def _show_cache_summary(
         config_file: str,
         store: Store,
         repo_root: str = '',
+        only_failing: bool = False,
+        files_mode: str = 'current',
+        use_color: bool = False,
 ) -> None:
-    """Print per-hook cache state for the current staged files."""
+    """Print per-hook cache state for tracked or staged files."""
     try:
         toplevel = git.get_root()
     except Exception:
         output.write_line('  (not in a git repo)')
         return
 
-    try:
-        from pre_commit.util import cmd_output_b
-        _, staged_out, _ = cmd_output_b(
-            'git', 'diff', '--cached', '--name-only', '--diff-filter=ACM',
-            cwd=toplevel, check=False,
-        )
-        staged_files = [f for f in staged_out.decode().splitlines() if f]
-    except Exception:
-        staged_files = []
-
-    if not staged_files:
-        output.write_line('  No staged files.')
-        return
+    if files_mode == 'current':
+        try:
+            checked_files = list(git.get_all_files())
+        except Exception:
+            checked_files = []
+        if not checked_files:
+            output.write_line('  No tracked files.')
+            return
+    else:
+        try:
+            from pre_commit.util import cmd_output_b
+            _, staged_out, _ = cmd_output_b(
+                'git', 'diff', '--cached', '--name-only',
+                '--diff-filter=ACM',
+                cwd=toplevel, check=False,
+            )
+            checked_files = [
+                f for f in staged_out.decode().splitlines() if f
+            ]
+        except Exception:
+            checked_files = []
+        if not checked_files:
+            output.write_line('  No staged files.')
+            return
 
     try:
         config = load_config(config_file)
-        hooks = list(all_hooks(config, store))
+        hooks = [h for h in all_hooks(config, store) if h.cache]
     except Exception as exc:
         output.write_line(f'  (could not load config: {exc})')
         return
@@ -214,39 +237,45 @@ def _show_cache_summary(
     all_checked = True
 
     for hook in hooks:
-        classifier = Classifier(staged_files)
+        classifier = Classifier(checked_files)
         hook_filenames = tuple(classifier.filenames_for_hook(hook))
         if not hook_filenames:
             continue
 
         hook_key = _compute_hook_key(hook)
-        output.write_line(f'  Hook: {hook.name}')
+        hook_lines = []
         for f in hook_filenames:
             fhash = _file_hash(f)
             result = store.get_hook_result(
                 hook_key, f, fhash, repo_root=repo_root,
             )
             if result == 0:
-                mark = 'pass'
+                mark = format_color('pass', GREEN, use_color)
             elif result == 1:
-                mark = 'FAIL'
+                mark = format_color('FAIL', RED, use_color)
                 all_pass = False
             else:
-                mark = '?   '
+                mark = format_color('?   ', YELLOW, use_color)
                 all_pass = False
                 all_checked = False
-            output.write_line(f'    [{mark}]  {f}')
+            if not only_failing or result != 0:
+                hook_lines.append(f'    [{mark}]  {f}')
+
+        if hook_lines:
+            output.write_line(f'  Hook: {hook.name}')
+            for line in hook_lines:
+                output.write_line(line)
 
     output.write_line('')
     if all_pass:
-        output.write_line('  Ready to commit: YES (all hooks passed)')
+        yes = format_color('YES', GREEN, use_color)
+        output.write_line(f'  Ready to commit: {yes} (all hooks passed)')
     elif not all_checked:
-        output.write_line(
-            '  Ready to commit: UNKNOWN '
-            '(some files not yet checked — is the daemon running?)',
-        )
+        unknown = format_color('UNKNOWN', YELLOW, use_color)
+        output.write_line(f'  Ready to commit: {unknown}')
     else:
-        output.write_line('  Ready to commit: NO (some hooks failed)')
+        no = format_color('NO', RED, use_color)
+        output.write_line(f'  Ready to commit: {no} (some hooks failed)')
 
 
 def _daemon_start(
@@ -272,18 +301,24 @@ def _daemon_start(
         else os.path.join(os.getcwd(), config_file)
     )
 
-    # Check if daemon is disabled in config
-    if os.path.exists(config_abs):
-        try:
-            cfg = load_config(config_abs)
-            if not cfg.get('daemon', True):
-                output.write_line(
-                    f'Daemon is disabled in {config_file} '
-                    '(`daemon: false`). Set `daemon: true` to enable.',
-                )
-                return 1
-        except Exception:
-            pass  # config parse error — let the daemon handle it
+    # Validate config before forking — avoids a silent daemon exit
+    if not os.path.exists(config_abs):
+        output.write_line(
+            f'Config file not found: {config_file}\n'
+            'Create a .pre-commit-config.yaml first.',
+        )
+        return 1
+    try:
+        cfg = load_config(config_abs)
+        if not cfg.get('daemon', True):
+            output.write_line(
+                f'Daemon is disabled in {config_file} '
+                '(`daemon: false`). Set `daemon: true` to enable.',
+            )
+            return 1
+    except Exception as exc:
+        output.write_line(f'Invalid config {config_file!r}: {exc}')
+        return 1
 
     if not foreground:
         child_pid = os.fork()
@@ -389,6 +424,20 @@ def _daemon_start(
                         _log(
                             f'Config reloaded: {hooks_count} hook(s) active',
                         )
+                    # Re-run hooks on files that differ from HEAD so the
+                    # cache reflects the new hook definitions immediately.
+                    reload_changed = _files_differing_from_head()
+                    if reload_changed:
+                        if foreground:
+                            _log(
+                                f'Running new hooks on '
+                                f'{len(reload_changed)} file(s) '
+                                f'differing from HEAD…',
+                            )
+                        _run_hooks_on_changed(
+                            reload_changed, hooks, file_hashes, store,
+                            foreground, repo_root=toplevel,
+                        )
                 except Exception as exc:
                     if foreground:
                         _log(f'Failed to reload config: {exc}')
@@ -465,43 +514,113 @@ def _daemon_status(
         store: Store,
         config_file: str | None = None,
         toplevel: str = '',
+        only_failing: bool = False,
+        files_mode: str = 'current',
+        use_color: bool = False,
 ) -> int:
     pid = _read_pid(store, toplevel)
     if pid is None:
-        output.write_line('Daemon is not running')
+        not_running = format_color('Daemon is not running', RED, use_color)
+        output.write_line(not_running)
         return 1
     if not _is_running(pid):
-        output.write_line(f'Daemon is not running (stale pid file for {pid})')
+        not_running = format_color(
+            f'Daemon is not running (stale pid file for {pid})',
+            RED, use_color,
+        )
+        output.write_line(not_running)
         _remove_pid(store, toplevel)
         _remove_status(store, toplevel)
         return 1
 
     # Running — show rich info from status file
     status = _read_status(store, toplevel)
+    running_hdr = format_color(
+        f'Daemon is running (pid {pid})', GREEN, use_color,
+    )
     if status:
         started = status.get('started_at', '?')
         config = status.get('config_file', '?')
         nhooks = status.get('hooks_count', '?')
         activity = status.get('last_activity', '?')
-        output.write_line(f'Daemon is running (pid {pid})')
-        output.write_line(f'  Started at:     {started}')
-        output.write_line(f'  Config file:    {config}')
-        output.write_line(f'  Hooks:          {nhooks}')
-        output.write_line(f'  Last activity:  {activity}')
+        output.write_line(running_hdr)
+        output.write_line(
+            f'  {format_color("Started at:", SUBTLE, use_color)}     {started}',
+        )
+        output.write_line(
+            f'  {format_color("Config file:", SUBTLE, use_color)}    {config}',
+        )
+        output.write_line(
+            f'  {format_color("Hooks:", SUBTLE, use_color)}          {nhooks}',
+        )
+        output.write_line(
+            f'  {format_color("Last activity:", SUBTLE, use_color)}  {activity}',
+        )
         if status.get('last_hook'):
             output.write_line(
-                f'  Last hook:      {status["last_hook"]} '
+                f'  {format_color("Last hook:", SUBTLE, use_color)}      '
+                f'{status["last_hook"]} '
                 f'→ {status.get("last_result", "?")}',
             )
     else:
-        output.write_line(f'Daemon is running (pid {pid})')
+        output.write_line(running_hdr)
 
-    # Cache summary for staged files
+    # Cache summary
     if config_file:
+        label = (
+            'current files' if files_mode == 'current'
+            else 'staged files'
+        )
         output.write_line('')
-        output.write_line('Cache summary (staged files):')
-        _show_cache_summary(config_file, store, repo_root=toplevel)
+        output.write_line(f'Cache summary ({label}):')
+        _show_cache_summary(
+            config_file, store, repo_root=toplevel,
+            only_failing=only_failing, files_mode=files_mode,
+            use_color=use_color,
+        )
 
+    return 0
+
+
+def _daemon_clear(
+        config_file: str,
+        store: Store,
+        toplevel: str = '',
+        hook_id: str | None = None,
+        file_path: str | None = None,
+) -> int:
+    """Clear cached hook results (and stored outputs) for this repo."""
+    hook_keys: set[str] | None = None
+    if hook_id is not None:
+        try:
+            config = load_config(config_file)
+            hooks = list(all_hooks(config, store))
+        except Exception as exc:
+            output.write_line(f'Could not load config: {exc}')
+            return 1
+        matched = [
+            h for h in hooks
+            if h.id == hook_id or h.alias == hook_id
+        ]
+        if not matched:
+            output.write_line(f'No hook with id {hook_id!r} found')
+            return 1
+        hook_keys = {_compute_hook_key(h) for h in matched}
+
+    n = store.clear_hook_results(
+        repo_root=toplevel,
+        hook_keys=hook_keys,
+        file_path=file_path,
+    )
+    store.clear_hook_outputs(repo_root=toplevel, hook_keys=hook_keys)
+
+    parts = []
+    if hook_id:
+        parts.append(f'hook {hook_id!r}')
+    if file_path:
+        parts.append(f'file {file_path!r}')
+    scope = ' and '.join(parts) if parts else 'all hooks'
+    output.write_line(f'Cleared {n} cached result(s) for {scope}')
     return 0
 
 
@@ -523,7 +642,20 @@ def daemon(config_file: str, store: Store, args: argparse.Namespace) -> int:
         return _daemon_stop(store, toplevel)
     elif subcommand == 'status':
         return _daemon_status(
-            store, config_file=config_file, toplevel=toplevel,
+            store,
+            config_file=config_file,
+            toplevel=toplevel,
+            only_failing=getattr(args, 'only_failing', False),
+            files_mode=getattr(args, 'files_mode', 'current'),
+            use_color=getattr(args, 'color', False),
+        )
+    elif subcommand == 'clear':
+        return _daemon_clear(
+            config_file,
+            store,
+            toplevel=toplevel,
+            hook_id=getattr(args, 'hook_id', None),
+            file_path=getattr(args, 'file_path', None),
         )
     else:
         raise NotImplementedError(f'Unknown daemon subcommand: {subcommand}')

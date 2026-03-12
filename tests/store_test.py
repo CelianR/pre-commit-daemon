@@ -395,6 +395,134 @@ def test_purge_stale_isolated_by_repo_root(store):
     ) == 0
 
 
+# ---------------------------------------------------------------------------
+# hook_run_outputs cache
+# ---------------------------------------------------------------------------
+
+def test_hook_output_miss(store):
+    """Cache miss returns None for a key that was never written."""
+    assert store.get_hook_output('k') is None
+
+
+def test_hook_output_set_get(store):
+    """Stored output is returned on exact hit."""
+    store.set_hook_output('k', b'error: bad\n')
+    assert store.get_hook_output('k') == b'error: bad\n'
+
+
+def test_hook_output_overwrite(store):
+    """Second write replaces the first."""
+    store.set_hook_output('k', b'first')
+    store.set_hook_output('k', b'second')
+    assert store.get_hook_output('k') == b'second'
+
+
+def test_hook_output_isolated_by_repo_root(store):
+    """Outputs for different repo roots are independent."""
+    store.set_hook_output('k', b'out-a', repo_root='/repo/a')
+    assert store.get_hook_output('k', repo_root='/repo/b') is None
+    assert store.get_hook_output('k', repo_root='/repo/a') == b'out-a'
+
+
+def test_hook_output_readonly_store_is_noop(tempdir_factory):
+    """set_hook_output on a readonly store silently does nothing."""
+    path = os.path.join(tempdir_factory.get(), '.pre-commit')
+    store = Store(path)
+    store.readonly = True
+    store.set_hook_output('k', b'data')
+    assert store.get_hook_output('k') is None
+
+
+# ---------------------------------------------------------------------------
+# clear_hook_results / clear_hook_outputs
+# ---------------------------------------------------------------------------
+
+def test_clear_hook_results_all(store):
+    """Clearing with no filters removes all results for the repo."""
+    store.set_hook_result('a', 'f.py', 'h', 0)
+    store.set_hook_result('b', 'g.py', 'h', 1)
+    n = store.clear_hook_results()
+    assert n == 2
+    assert store.get_hook_result('a', 'f.py', 'h') is None
+    assert store.get_hook_result('b', 'g.py', 'h') is None
+
+
+def test_clear_hook_results_by_hook_key(store):
+    """Clearing a specific hook_key leaves other hooks intact."""
+    store.set_hook_result('hook-a', 'f.py', 'h', 0)
+    store.set_hook_result('hook-b', 'f.py', 'h', 1)
+    n = store.clear_hook_results(hook_keys={'hook-a'})
+    assert n == 1
+    assert store.get_hook_result('hook-a', 'f.py', 'h') is None
+    assert store.get_hook_result('hook-b', 'f.py', 'h') == 1
+
+
+def test_clear_hook_results_by_file(store):
+    """Clearing a specific file leaves other files intact."""
+    store.set_hook_result('k', 'a.py', 'h', 0)
+    store.set_hook_result('k', 'b.py', 'h', 1)
+    n = store.clear_hook_results(file_path='a.py')
+    assert n == 1
+    assert store.get_hook_result('k', 'a.py', 'h') is None
+    assert store.get_hook_result('k', 'b.py', 'h') == 1
+
+
+def test_clear_hook_results_by_hook_and_file(store):
+    """Clearing by both hook and file is an intersection."""
+    store.set_hook_result('a', 'f.py', 'h', 0)
+    store.set_hook_result('a', 'g.py', 'h', 0)
+    store.set_hook_result('b', 'f.py', 'h', 0)
+    n = store.clear_hook_results(hook_keys={'a'}, file_path='f.py')
+    assert n == 1
+    assert store.get_hook_result('a', 'f.py', 'h') is None
+    assert store.get_hook_result('a', 'g.py', 'h') == 0
+    assert store.get_hook_result('b', 'f.py', 'h') == 0
+
+
+def test_clear_hook_results_empty_hook_keys_is_noop(store):
+    """Passing an empty set clears nothing."""
+    store.set_hook_result('k', 'f.py', 'h', 0)
+    n = store.clear_hook_results(hook_keys=set())
+    assert n == 0
+    assert store.get_hook_result('k', 'f.py', 'h') == 0
+
+
+def test_clear_hook_results_isolated_by_repo_root(store):
+    """Clear for repo A does not affect repo B."""
+    store.set_hook_result('k', 'f.py', 'h', 0, repo_root='/a')
+    store.set_hook_result('k', 'f.py', 'h', 0, repo_root='/b')
+    store.clear_hook_results(repo_root='/a')
+    assert store.get_hook_result('k', 'f.py', 'h', repo_root='/a') is None
+    assert store.get_hook_result('k', 'f.py', 'h', repo_root='/b') == 0
+
+
+def test_clear_hook_outputs_all(store):
+    """Clearing outputs with no filter removes all for repo."""
+    store.set_hook_output('a', b'out-a')
+    store.set_hook_output('b', b'out-b')
+    store.clear_hook_outputs()
+    assert store.get_hook_output('a') is None
+    assert store.get_hook_output('b') is None
+
+
+def test_clear_hook_outputs_by_hook_key(store):
+    """Clearing a specific hook_key leaves others intact."""
+    store.set_hook_output('a', b'out-a')
+    store.set_hook_output('b', b'out-b')
+    store.clear_hook_outputs(hook_keys={'a'})
+    assert store.get_hook_output('a') is None
+    assert store.get_hook_output('b') == b'out-b'
+
+
+def test_clear_hook_outputs_isolated_by_repo_root(store):
+    """Clear outputs for repo A does not affect repo B."""
+    store.set_hook_output('k', b'out', repo_root='/a')
+    store.set_hook_output('k', b'out', repo_root='/b')
+    store.clear_hook_outputs(repo_root='/a')
+    assert store.get_hook_output('k', repo_root='/a') is None
+    assert store.get_hook_output('k', repo_root='/b') == b'out'
+
+
 def test_create_when_store_already_exists(store):
     # an assertion that this is idempotent and does not crash
     Store(store.directory)
