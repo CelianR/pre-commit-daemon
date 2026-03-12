@@ -290,8 +290,17 @@ def _run_single_hook(
 
             time_before = time.monotonic()
             language = languages[hook.language]
+            # When a fix command is configured and not disabled, skip running
+            # the entry for uncached files and invoke fix directly instead.
+            # This avoids a redundant entry run: fix is idempotent so running
+            # it on already-passing files is harmless.
+            should_run_entry = run_filenames or (
+                not hook.pass_filenames and (no_cache or need_run)
+            )
+            fix_directly = bool(should_run_entry) and bool(hook.fix) and not no_fix
+
             with language.in_env(hook.prefix, hook.language_version):
-                if run_filenames or (not hook.pass_filenames and (no_cache or need_run)):
+                if should_run_entry and not fix_directly:
                     retcode, out = language.run_hook(
                         hook.prefix,
                         hook.entry,
@@ -302,7 +311,8 @@ def _run_single_hook(
                         color=use_color,
                     )
                 else:
-                    # Only cached-fail files remain; entry has nothing to run
+                    # Either nothing to run (all cached-fail) or skipping
+                    # entry in favour of running fix directly.
                     retcode, out = 0, b''
             duration = round(time.monotonic() - time_before, 2) or 0
             diff_after = _get_diff()
@@ -310,14 +320,16 @@ def _run_single_hook(
             # if the hook makes changes, fail the commit
             files_modified = diff_before != diff_after
 
-            # Files that need fixing: entry-failed files + pre-cached fails
-            entry_failed = run_filenames if (retcode or files_modified) else ()
+            # Files that need fixing: entry-failed + pre-cached fails.
+            # When fix_directly=True, treat all would-be-run files as targets.
+            entry_failed = (
+                run_filenames
+                if (fix_directly or retcode or files_modified)
+                else ()
+            )
             fix_target = tuple(entry_failed) + cached_fail_filenames
-            # For pass_filenames=false: fix should run when hook failed OR when
-            # there are cached-fail files (fix_target is non-empty but has no
-            # meaning as file args — the fix command runs without filenames).
             needs_fix = bool(fix_target) or (
-                not hook.pass_filenames and (retcode or files_modified)
+                not hook.pass_filenames and (fix_directly or retcode or files_modified)
             )
 
             if needs_fix and hook.fix and not no_fix:
@@ -330,6 +342,9 @@ def _run_single_hook(
                 fix_invocation_target = (
                     fix_target if hook.pass_filenames else ()
                 )
+                # Snapshot hashes before fix to detect file modifications.
+                stage_target = fix_target if hook.pass_filenames else filenames
+                hashes_before_fix = {f: _file_hash(f) for f in stage_target}
                 with language.in_env(hook.prefix, hook.language_version):
                     fix_retcode, _ = languages['unsupported'].run_hook(
                         hook.prefix,
@@ -344,12 +359,23 @@ def _run_single_hook(
                 # For pass_filenames=true use fix_target (specific failing
                 # files); for pass_filenames=false stage all matched files
                 # since the fix may have touched any of them.
-                stage_target = fix_target if hook.pass_filenames else filenames
                 if not fix_retcode:
                     cmd_output_b('git', 'add', '--', *stage_target, check=False)
                     diff_after = _get_diff()
-                    print_color = color.YELLOW
-                    status = 'Fixed'
+                    actually_modified = (
+                        bool(cached_fail_filenames) or
+                        diff_after != diff_before or
+                        any(
+                            _file_hash(f) != hashes_before_fix[f]
+                            for f in stage_target
+                        )
+                    )
+                    if actually_modified:
+                        print_color = color.YELLOW
+                        status = 'Fixed'
+                    else:
+                        print_color = color.GREEN
+                        status = 'Passed'
                     retcode = 0
                     files_modified = False
                 else:

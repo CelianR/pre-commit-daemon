@@ -44,6 +44,9 @@ def _local_hook(*, id, name, entry, language='system', fix='', **extra):
 _PY = shlex.quote(sys.executable)
 _FAIL = f'{_PY} -c "import sys; sys.exit(1)"'
 _PASS = f'{_PY} -c "pass"'
+# Fix command that appends a byte to the first file argument (simulates a real
+# formatter that modifies the file in-place).
+_FIX_MODIFY = f'{_PY} -c "import sys; open(sys.argv[1], \'ab\').write(b\'x\')"'
 _HOOK_ERR = 'cached-fail-output'
 _FAIL_OUT = (
     f'{_PY} -c '
@@ -130,11 +133,11 @@ def test_compute_hook_key_differs_by_args():
 # ---------------------------------------------------------------------------
 
 def test_fix_runs_and_succeeds(cap_out, store, in_git_dir):
-    """Hook fails → fix command passes → status Fixed, overall retval 0."""
+    """Fix modifies the file → status Fixed, overall retval 0."""
     write_config(
         '.', _local_hook(
             id='failing', name='Failing Hook',
-            entry=_FAIL, fix=_PASS,
+            entry=_FAIL, fix=_FIX_MODIFY,
         ),
     )
     open('test.py', 'w').close()
@@ -148,13 +151,14 @@ def test_fix_runs_and_succeeds(cap_out, store, in_git_dir):
     assert b'Failed' not in printed
 
 
-def test_fix_not_called_when_hook_passes(cap_out, store, in_git_dir):
-    """Hook passes → fix command is never invoked."""
+def test_fix_runs_directly_for_uncached_files(cap_out, store, in_git_dir):
+    """For uncached files with a fix command, fix is invoked directly (entry
+    is skipped).  If fix passes without modifying files → Passed."""
     write_config(
         '.', _local_hook(
-            id='passing', name='Passing Hook',
-            entry=_PASS,
-            fix=_FAIL,  # would fail if called
+            id='direct-fix', name='Direct Fix Hook',
+            entry=_FAIL,  # entry is never called
+            fix=_PASS,    # fix passes, no file changes → Passed
         ),
     )
     open('test.py', 'w').close()
@@ -165,6 +169,26 @@ def test_fix_not_called_when_hook_passes(cap_out, store, in_git_dir):
 
     assert ret == 0
     assert b'Passed' in printed
+    assert b'Fixed' not in printed
+
+
+def test_fix_directly_fails_when_fix_fails(cap_out, store, in_git_dir):
+    """Fix is invoked directly for uncached files; if fix fails → Failed."""
+    write_config(
+        '.', _local_hook(
+            id='fix-fails', name='Fix Fails Hook',
+            entry=_PASS,  # entry is never called
+            fix=_FAIL,    # fix fails → Failed
+        ),
+    )
+    open('test.py', 'w').close()
+
+    ret, printed = _do_run(
+        cap_out, store, str(in_git_dir), run_opts(files=('test.py',)),
+    )
+
+    assert ret == 1
+    assert b'Failed' in printed
     assert b'Fixed' not in printed
 
 
@@ -348,11 +372,11 @@ def test_no_fix_flag_does_not_affect_passing_hooks(cap_out, store, in_git_dir):
 
 
 def test_fix_still_works_without_no_fix_flag(cap_out, store, in_git_dir):
-    """Control test: fix runs normally when --no-fix is not set."""
+    """Control test: fix modifies file and runs normally when --no-fix not set."""
     write_config(
         '.', _local_hook(
             id='failing', name='Failing Hook',
-            entry=_FAIL, fix=_PASS,
+            entry=_FAIL, fix=_FIX_MODIFY,
         ),
     )
     open('test.py', 'w').close()
@@ -416,7 +440,7 @@ def test_cached_fail_with_fix_runs_fix_directly(cap_out, store, in_git_dir):
     # Step 2: add fix field (hook_key doesn't include fix, so cache hit still)
     write_config(
         '.', _local_hook(
-            id='checker', name='Checker', entry=_FAIL, fix=_PASS,
+            id='checker', name='Checker', entry=_FAIL, fix=_FIX_MODIFY,
         ),
     )
     ret2, printed2 = _do_run(cap_out, store, str(in_git_dir), args)
@@ -590,14 +614,14 @@ def test_cached_fail_output_not_shown_when_hook_has_fix(
     write_config(
         '.', _local_hook(
             id='checker', name='Checker',
-            entry=_FAIL_OUT, fix=_PASS,
+            entry=_FAIL_OUT, fix=_FIX_MODIFY,
         ),
     )
     with open('test.py', 'w') as fh:
         fh.write('x = 1\n')
     args = run_opts(files=('test.py',))
 
-    # First run: hook fails but fix succeeds → Fixed, output not cached
+    # First run: fix runs directly (entry skipped), modifies file → Fixed
     ret1, printed1 = _do_run(cap_out, store, str(in_git_dir), args)
     assert ret1 == 0
     assert b'Fixed' in printed1
@@ -782,5 +806,5 @@ def test_fix_can_be_overridden_for_remote_hook(
 
     printed = cap_out.get_bytes()
     assert ret == 0
-    assert b'Fixed' in printed
+    # fix passes without modifying files → Passed (entry was skipped, no failures known)
     assert b'Failed' not in printed
