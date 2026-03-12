@@ -194,7 +194,7 @@ def _show_cache_summary(
         files_mode: str = 'current',
         use_color: bool = False,
 ) -> None:
-    """Print per-hook cache state for tracked or staged files."""
+    """Print per-hook cache state for files differing from HEAD or staged files."""
     try:
         toplevel = git.get_root()
     except Exception:
@@ -202,12 +202,9 @@ def _show_cache_summary(
         return
 
     if files_mode == 'current':
-        try:
-            checked_files = list(git.get_all_files())
-        except Exception:
-            checked_files = []
+        checked_files = _files_differing_from_head()
         if not checked_files:
-            output.write_line('  No tracked files.')
+            output.write_line('  No modified files.')
             return
     else:
         try:

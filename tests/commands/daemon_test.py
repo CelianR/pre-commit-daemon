@@ -678,13 +678,18 @@ def test_show_cache_summary_filter_fail_only(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('pass.py', 'w') as fh:
             fh.write('x = 1\n')
         with open('fail.py', 'w') as fh:
             fh.write('y = 2\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'pass.py', 'fail.py')
-        git_commit()  # commit so files appear in git ls-files
+        git_commit()
+        # Dirty both files so they differ from HEAD (current mode shows them)
+        with open('pass.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
+        with open('fail.py', 'w') as fh:
+            fh.write('y = 2  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -735,11 +740,14 @@ def test_show_cache_summary_filter_pass_only(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('f.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'f.py')
         git_commit()
+        # Dirty the file so it differs from HEAD
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -777,13 +785,18 @@ def test_show_cache_summary_filter_unknown(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('cached.py', 'w') as fh:
             fh.write('x = 1\n')
         with open('pending.py', 'w') as fh:
             fh.write('y = 2\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'cached.py', 'pending.py')
         git_commit()
+        # Dirty both files so they differ from HEAD
+        with open('cached.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
+        with open('pending.py', 'w') as fh:
+            fh.write('y = 2  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -823,13 +836,18 @@ def test_show_cache_summary_default_hides_unknown(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('cached.py', 'w') as fh:
             fh.write('x = 1\n')
         with open('pending.py', 'w') as fh:
             fh.write('y = 2\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'cached.py', 'pending.py')
         git_commit()
+        # Dirty both files so they differ from HEAD
+        with open('cached.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
+        with open('pending.py', 'w') as fh:
+            fh.write('y = 2  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -855,7 +873,7 @@ def test_show_cache_summary_default_hides_unknown(cap_out, store, in_git_dir):
 # ---------------------------------------------------------------------------
 
 def test_show_cache_summary_files_mode_current(cap_out, store, in_git_dir):
-    """files_mode=current uses all tracked (committed) working-tree files."""
+    """files_mode=current shows files that differ from HEAD."""
     import shlex
     import sys
     _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
@@ -872,12 +890,14 @@ def test_show_cache_summary_files_mode_current(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
-        # Commit the file so it appears in git ls-files
+        from pre_commit.util import cmd_output_b
         with open('tracked.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'tracked.py')
         git_commit()
+        # Dirty the file so it differs from HEAD
+        with open('tracked.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -890,7 +910,7 @@ def test_show_cache_summary_files_mode_current(cap_out, store, in_git_dir):
                 hk, 'tracked.py', _file_hash('tracked.py'), 0,
             )
 
-        # files_mode='current' should pick up the committed file
+        # files_mode='current' shows the modified file
         _show_cache_summary(
             '.pre-commit-config.yaml', store, files_mode='current',
         )
@@ -984,11 +1004,14 @@ def test_show_cache_summary_excludes_daemon_false_hooks(
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('f.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'f.py')
         git_commit()
+        # Dirty the file so it differs from HEAD
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         _show_cache_summary('.pre-commit-config.yaml', store)
 
@@ -1220,11 +1243,13 @@ def test_show_cache_summary_pass_colored(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('f.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'f.py')
         git_commit()
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -1265,11 +1290,13 @@ def test_show_cache_summary_fail_colored(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('f.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'f.py')
         git_commit()
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         from pre_commit.commands.run import _file_hash, _compute_hook_key
         from pre_commit.clientlib import load_config
@@ -1309,11 +1336,13 @@ def test_show_cache_summary_unknown_colored(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('f.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'f.py')
         git_commit()
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         # No cache entry → unknown
         _show_cache_summary(
@@ -1343,11 +1372,13 @@ def test_show_cache_summary_no_color_no_escapes(cap_out, store, in_git_dir):
         },
     )
     with cwd(str(in_git_dir)):
+        from pre_commit.util import cmd_output_b
         with open('f.py', 'w') as fh:
             fh.write('x = 1\n')
-        from pre_commit.util import cmd_output_b
         cmd_output_b('git', 'add', 'f.py')
         git_commit()
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
 
         _show_cache_summary(
             '.pre-commit-config.yaml', store, use_color=False,

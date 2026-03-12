@@ -625,7 +625,7 @@ def run(
             config, hooks, skips, args,
             store=store,
             no_fix=getattr(args, 'no_fix', False),
-            repo_root=os.getcwd(),
+            repo_root=git.get_root(),
             no_cache=no_cache,
         )
 
