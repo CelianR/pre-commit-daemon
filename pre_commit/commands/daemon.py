@@ -6,11 +6,13 @@ import hashlib
 import json
 import os
 import signal
+import sys
 import time
 from typing import Any
 
 from pre_commit import git
 from pre_commit import output
+from pre_commit.all_languages import languages
 from pre_commit.clientlib import load_config
 from pre_commit.color import format_color
 from pre_commit.color import GREEN
@@ -23,6 +25,7 @@ from pre_commit.commands.run import Classifier
 from pre_commit.repository import all_hooks
 from pre_commit.repository import install_hook_envs
 from pre_commit.store import Store
+from pre_commit.util import cmd_output_b
 
 
 def _repo_slug(toplevel: str) -> str:
@@ -108,7 +111,6 @@ def _log(msg: str) -> None:
 
 def _files_differing_from_head() -> list[str]:
     """Return tracked files whose working-tree content differs from HEAD."""
-    from pre_commit.util import cmd_output_b
     try:
         # --diff-filter=d excludes deleted files (nothing to run hooks on)
         _, out, _ = cmd_output_b(
@@ -133,8 +135,6 @@ def _run_hooks_on_changed(
     Returns a (hook_id, result) tuple for the last hook that ran, or None if
     no hook ran (e.g. no files matched any hook).
     """
-    from pre_commit.all_languages import languages
-
     last: tuple[str, int] | None = None
     classifier = Classifier(changed)
     for hook in hooks:
@@ -200,7 +200,7 @@ def _show_cache_summary(
         files_mode: str = 'current',
         use_color: bool = False,
 ) -> None:
-    """Print per-hook cache state for files differing from HEAD or staged files."""
+    """Print per-hook cache state for changed or staged files."""
     try:
         toplevel = git.get_root()
     except Exception:
@@ -214,7 +214,6 @@ def _show_cache_summary(
             return
     else:
         try:
-            from pre_commit.util import cmd_output_b
             _, staged_out, _ = cmd_output_b(
                 'git', 'diff', '--cached', '--name-only',
                 '--diff-filter=ACM',
@@ -307,7 +306,6 @@ def _daemon_start(
     interval: float,
     foreground: bool = False,
 ) -> int:
-    import sys
     if sys.platform == 'win32':
         output.write_line(
             'pre-commit daemon is not supported on Windows.\n'
@@ -561,7 +559,9 @@ def _daemon_stop(store: Store, toplevel: str = '', wait: float = 5.0) -> int:
             output.write_line('Daemon stopped.')
             return 0
         time.sleep(0.1)
-    output.write_line(f'Warning: daemon (pid {pid}) did not stop within {wait}s')
+    output.write_line(
+        f'Warning: daemon (pid {pid}) did not stop within {wait}s',
+    )
     return 0
 
 
@@ -600,16 +600,20 @@ def _daemon_status(
         activity = status.get('last_activity', '?')
         output.write_line(running_hdr)
         output.write_line(
-            f'  {format_color("Started at:", SUBTLE, use_color)}     {started}',
+            f'  {format_color("Started at:", SUBTLE, use_color)}     ' +
+            started,
         )
         output.write_line(
-            f'  {format_color("Config file:", SUBTLE, use_color)}    {config}',
+            f'  {format_color("Config file:", SUBTLE, use_color)}    ' +
+            config,
         )
         output.write_line(
-            f'  {format_color("Hooks:", SUBTLE, use_color)}          {nhooks}',
+            f'  {format_color("Hooks:", SUBTLE, use_color)}          ' +
+            nhooks,
         )
         output.write_line(
-            f'  {format_color("Last activity:", SUBTLE, use_color)}  {activity}',
+            f'  {format_color("Last activity:", SUBTLE, use_color)} ' +
+            activity,
         )
         if status.get('last_hook'):
             output.write_line(

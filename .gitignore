@@ -4,8 +4,3 @@
 /.tox
 /dist
 .vscode/
-
-# TODO(celian): remove
-examples
-CLAUDE.md
-.claude
