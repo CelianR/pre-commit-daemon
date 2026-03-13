@@ -300,6 +300,14 @@ def _daemon_start(
     interval: float,
     foreground: bool = False,
 ) -> int:
+    import sys
+    if sys.platform == 'win32':
+        output.write_line(
+            'pre-commit daemon is not supported on Windows.\n'
+            'Run hooks manually with `pre-commit run --all-files`.',
+        )
+        return 1
+
     # Resolve git root first so we can scope the PID file per repo
     try:
         toplevel = git.get_root()
