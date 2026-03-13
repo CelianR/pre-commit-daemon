@@ -296,7 +296,7 @@ def _run_single_hook(
             # it on already-passing files is harmless.
             should_run_entry = run_filenames or (
                 not hook.pass_filenames and (no_cache or need_run)
-            )
+            ) or (not filenames and hook.always_run)
             fix_directly = (
                 bool(should_run_entry) and bool(hook.fix) and not no_fix
             )
