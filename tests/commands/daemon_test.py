@@ -178,7 +178,7 @@ def test_daemon_start_blocked_when_daemon_false_in_config(
                     },
                 ],
             }],
-            'daemon': False,
+            'cache': False,
         },
     )
     with cwd(str(in_git_dir)):
@@ -205,7 +205,7 @@ def test_daemon_start_allowed_when_daemon_true_in_config(
                     },
                 ],
             }],
-            'daemon': True,
+            'cache': True,
         },
     )
     with cwd(str(in_git_dir)):
@@ -1386,3 +1386,194 @@ def test_show_cache_summary_no_color_no_escapes(cap_out, store, in_git_dir):
 
     printed = cap_out.get_bytes()
     assert b'\033[' not in printed
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: _run_hooks_on_changed returns last (hook_id, result)
+# ---------------------------------------------------------------------------
+
+def test_run_hooks_on_changed_returns_none_when_no_hook_matches(store):
+    """Returns None when no hook produces any matching files."""
+    from unittest import mock
+    from pre_commit.commands.daemon import _run_hooks_on_changed
+
+    hook = mock.Mock()
+    hook.id = 'my-hook'
+    hook.cache = True
+    hook.pass_filenames = True
+    hook.files = ''
+    hook.exclude = '^$'
+    hook.types = ['file']
+    hook.types_or = []
+    hook.exclude_types = []
+
+    with mock.patch('pre_commit.commands.daemon.Classifier') as MockClassifier:
+        instance = MockClassifier.return_value
+        instance.filenames_for_hook.return_value = iter([])  # no matches
+
+        result = _run_hooks_on_changed(
+            ['f.py'], [hook], {}, store, foreground=False,
+        )
+
+    assert result is None
+
+
+def test_run_hooks_on_changed_returns_last_hook_and_result(
+    store, in_git_dir,
+):
+    """Returns (hook_id, result) for the last hook that ran."""
+    import shlex
+    import sys
+    from pre_commit.commands.daemon import _run_hooks_on_changed
+    from pre_commit.commands.run import _file_hash
+    from pre_commit.clientlib import load_config
+    from pre_commit.repository import all_hooks, install_hook_envs
+    from pre_commit.util import cmd_output_b
+
+    _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'always-pass', 'name': 'Always Pass',
+                    'entry': _PASS, 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1\n')
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+        with open('f.py', 'w') as fh:
+            fh.write('x = 1  # modified\n')
+
+        config = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(config, store))
+        install_hook_envs(hooks, store)
+        file_hashes = {'f.py': _file_hash('f.py')}
+
+        ret = _run_hooks_on_changed(
+            ['f.py'], hooks, file_hashes, store, foreground=False,
+        )
+
+    assert ret is not None
+    hook_id, result = ret
+    assert hook_id == 'always-pass'
+    assert result == 0  # pass
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: _daemon_stop waits for the process to die
+# ---------------------------------------------------------------------------
+
+def test_daemon_stop_waits_for_process_to_die(cap_out, store):
+    """_daemon_stop polls until the process is gone before returning."""
+    import subprocess
+    from unittest import mock
+
+    proc = subprocess.Popen(['sleep', '10'])
+    pid = proc.pid
+    _write_pid(store, pid)
+
+    call_count = [0]
+
+    def mock_is_running(p: int) -> bool:
+        call_count[0] += 1
+        if call_count[0] <= 1:
+            return True  # first check: still running
+        return False     # subsequent checks: gone
+
+    with mock.patch('pre_commit.commands.daemon._is_running', mock_is_running):
+        ret = _daemon_stop(store, wait=5.0)
+
+    proc.kill()
+    proc.wait()
+
+    assert ret == 0
+    assert b'Daemon stopped.' in cap_out.get_bytes()
+    assert call_count[0] >= 2
+
+
+def test_daemon_stop_warns_when_timeout_exceeded(cap_out, store):
+    """_daemon_stop returns 0 with a warning when the process doesn't die in time."""
+    import subprocess
+    from unittest import mock
+
+    # Use a real process so os.kill(pid, SIGTERM) targets it, not us
+    proc = subprocess.Popen(['sleep', '10'])
+    pid = proc.pid
+    _write_pid(store, pid)
+
+    try:
+        # Patch _is_running to always claim the process is alive (simulates timeout)
+        with mock.patch('pre_commit.commands.daemon._is_running', return_value=True):
+            # Also patch os.kill so SIGTERM goes nowhere harmful
+            with mock.patch('os.kill'):
+                ret = _daemon_stop(store, wait=0.0)
+    finally:
+        proc.kill()
+        proc.wait()
+
+    assert ret == 0
+    assert b'Warning' in cap_out.get_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Main loop hashes only files differing from HEAD
+# ---------------------------------------------------------------------------
+
+def test_main_loop_removes_reverted_file_from_hashes(store, in_git_dir):
+    """When a file reverts to HEAD between polls it is removed from file_hashes."""
+    import shlex
+    import sys
+    from pre_commit.commands.daemon import _files_differing_from_head
+    from pre_commit.commands.run import _file_hash
+    from pre_commit.util import cmd_output_b
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': f'{shlex.quote(sys.executable)} -c "pass"',
+                    'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        with open('f.py', 'w') as fh:
+            fh.write('original\n')
+        cmd_output_b('git', 'add', 'f.py')
+        git_commit()
+
+        # Poll 1: file differs from HEAD
+        with open('f.py', 'w') as fh:
+            fh.write('modified\n')
+        differ = set(_files_differing_from_head())
+        assert 'f.py' in differ
+
+        # Simulate main loop: track hashes for differing files
+        file_hashes: dict[str, str] = {}
+        changed = [f for f in differ if _file_hash(f) != file_hashes.get(f, '')]
+        for f in changed:
+            file_hashes[f] = _file_hash(f)
+        assert 'f.py' in file_hashes
+
+        # Poll 2: file reverted to HEAD
+        with open('f.py', 'w') as fh:
+            fh.write('original\n')
+        differ2 = set(_files_differing_from_head())
+        assert 'f.py' not in differ2
+
+        # Simulate main loop cleanup: remove reverted files
+        for f in list(file_hashes):
+            if f not in differ2:
+                del file_hashes[f]
+
+        assert 'f.py' not in file_hashes

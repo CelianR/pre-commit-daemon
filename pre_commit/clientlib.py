@@ -519,7 +519,7 @@ CONFIG_SCHEMA = cfgv.Map(
     cfgv.Optional('files', check_string_regex, ''),
     cfgv.Optional('exclude', check_string_regex, '^$'),
     cfgv.Optional('fail_fast', cfgv.check_bool, False),
-    cfgv.Optional('daemon', cfgv.check_bool, True),
+    cfgv.Optional('cache', cfgv.check_bool, True),
     cfgv.WarnAdditionalKeys(
         (
             'repos',
@@ -531,7 +531,7 @@ CONFIG_SCHEMA = cfgv.Map(
             'fail_fast',
             'minimum_pre_commit_version',
             'ci',
-            'daemon',
+            'cache',
         ),
         warn_unknown_keys_root,
     ),

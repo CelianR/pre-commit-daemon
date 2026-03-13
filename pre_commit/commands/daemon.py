@@ -127,10 +127,15 @@ def _run_hooks_on_changed(
         store: Store,
         foreground: bool,
         repo_root: str = '',
-) -> None:
-    """Run all matching hooks on *changed* files and write results to cache."""
+) -> tuple[str, int] | None:
+    """Run all matching hooks on *changed* files and write results to cache.
+
+    Returns a (hook_id, result) tuple for the last hook that ran, or None if
+    no hook ran (e.g. no files matched any hook).
+    """
     from pre_commit.all_languages import languages
 
+    last: tuple[str, int] | None = None
     classifier = Classifier(changed)
     for hook in hooks:
         if not hook.cache:
@@ -162,6 +167,7 @@ def _run_hooks_on_changed(
                 )
             result = 0 if retcode == 0 else 1
             result_str = 'pass' if result == 0 else 'fail'
+            last = (hook.id, result)
             if foreground:
                 _log(
                     f'Hook {hook.id!r} → {result_str} '
@@ -179,6 +185,7 @@ def _run_hooks_on_changed(
         except Exception as exc:
             if foreground:
                 _log(f'Error running hook {hook.id!r}: {exc}')
+    return last
 
 
 def _hook_keys_for_hooks(hooks: list[Any]) -> set[str]:
@@ -334,10 +341,10 @@ def _daemon_start(
         return 1
     try:
         cfg = load_config(config_abs)
-        if not cfg.get('daemon', True):
+        if not cfg.get('cache', True):
             output.write_line(
                 f'Daemon is disabled in {config_file} '
-                '(`daemon: false`). Set `daemon: true` to enable.',
+                '(`cache: false`). Set `cache: true` to enable.',
             )
             return 1
     except Exception as exc:
@@ -413,10 +420,22 @@ def _daemon_start(
                     f'Startup: {len(initial_changed)} file(s)'
                     f' differ from HEAD, running hooks…',
                 )
-            _run_hooks_on_changed(
+            last = _run_hooks_on_changed(
                 initial_changed, hooks, file_hashes, store, foreground,
                 repo_root=toplevel,
             )
+            if last is not None:
+                _write_status(
+                    store, {
+                        'pid': os.getpid(),
+                        'started_at': started_at,
+                        'config_file': config_file,
+                        'last_activity': _ts(),
+                        'last_hook': last[0],
+                        'last_result': 'pass' if last[1] == 0 else 'fail',
+                        'hooks_count': hooks_count,
+                    }, toplevel,
+                )
 
         while running:
             time.sleep(interval)
@@ -468,22 +487,24 @@ def _daemon_start(
                     continue
 
             try:
-                current_files = set(git.get_all_files())
+                differ_now = set(_files_differing_from_head())
             except Exception as exc:
                 if foreground:
-                    _log(f'git ls-files failed: {exc}')
+                    _log(f'git diff HEAD failed: {exc}')
                 continue
 
             changed = [
-                f for f in current_files
-                if _file_hash(f) != file_hashes.get(f)
+                f for f in differ_now
+                if _file_hash(f) != file_hashes.get(f, '')
             ]
 
-            # Refresh stored hashes (new, changed, and deleted files)
+            # Update stored hashes for changed/new files
             for f in changed:
                 file_hashes[f] = _file_hash(f)
-            for f in set(file_hashes) - current_files:
-                del file_hashes[f]
+            # Remove files that are now back at HEAD (reverted)
+            for f in list(file_hashes):
+                if f not in differ_now:
+                    del file_hashes[f]
 
             if not changed:
                 continue
@@ -495,7 +516,7 @@ def _daemon_start(
                     f'{"…" if len(changed) > 5 else ""}',
                 )
 
-            _run_hooks_on_changed(
+            last = _run_hooks_on_changed(
                 changed, hooks, file_hashes, store, foreground,
                 repo_root=toplevel,
             )
@@ -505,8 +526,11 @@ def _daemon_start(
                     'started_at': started_at,
                     'config_file': config_file,
                     'last_activity': _ts(),
-                    'last_hook': None,
-                    'last_result': None,
+                    'last_hook': last[0] if last else None,
+                    'last_result': (
+                        'pass' if last and last[1] == 0
+                        else ('fail' if last else None)
+                    ),
                     'hooks_count': hooks_count,
                 }, toplevel,
             )
@@ -519,7 +543,7 @@ def _daemon_start(
     return 0
 
 
-def _daemon_stop(store: Store, toplevel: str = '') -> int:
+def _daemon_stop(store: Store, toplevel: str = '', wait: float = 5.0) -> int:
     pid = _read_pid(store, toplevel)
     if pid is None:
         output.write_line('No daemon running')
@@ -531,6 +555,13 @@ def _daemon_stop(store: Store, toplevel: str = '') -> int:
         return 1
     os.kill(pid, signal.SIGTERM)
     output.write_line(f'Sent SIGTERM to daemon (pid {pid})')
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if not _is_running(pid):
+            output.write_line('Daemon stopped.')
+            return 0
+        time.sleep(0.1)
+    output.write_line(f'Warning: daemon (pid {pid}) did not stop within {wait}s')
     return 0
 
 
