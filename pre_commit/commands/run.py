@@ -297,7 +297,9 @@ def _run_single_hook(
             should_run_entry = run_filenames or (
                 not hook.pass_filenames and (no_cache or need_run)
             )
-            fix_directly = bool(should_run_entry) and bool(hook.fix) and not no_fix
+            fix_directly = (
+                bool(should_run_entry) and bool(hook.fix) and not no_fix
+            )
 
             with language.in_env(hook.prefix, hook.language_version):
                 if should_run_entry and not fix_directly:
@@ -329,7 +331,9 @@ def _run_single_hook(
             )
             fix_target = tuple(entry_failed) + cached_fail_filenames
             needs_fix = bool(fix_target) or (
-                not hook.pass_filenames and (fix_directly or retcode or files_modified)
+                not hook.pass_filenames and (
+                    fix_directly or retcode or files_modified
+                )
             )
 
             if needs_fix and hook.fix and not no_fix:
@@ -360,7 +364,10 @@ def _run_single_hook(
                 # files); for pass_filenames=false stage all matched files
                 # since the fix may have touched any of them.
                 if not fix_retcode:
-                    cmd_output_b('git', 'add', '--', *stage_target, check=False)
+                    cmd_output_b(
+                        'git', 'add', '--', *stage_target,
+                        check=False,
+                    )
                     diff_after = _get_diff()
                     actually_modified = (
                         bool(cached_fail_filenames) or

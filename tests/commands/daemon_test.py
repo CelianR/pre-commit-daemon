@@ -1047,7 +1047,7 @@ def test_daemon_clear_removes_all_results(cap_out, store, in_git_dir):
 
     _write_hook_config('.', _PASS)
     with cwd(str(in_git_dir)):
-        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.commands.run import _compute_hook_key
         from pre_commit.clientlib import load_config
         from pre_commit.repository import all_hooks
         import os
@@ -1076,7 +1076,7 @@ def test_daemon_clear_by_hook_id(cap_out, store, in_git_dir):
 
     _write_hook_config('.', _PASS)
     with cwd(str(in_git_dir)):
-        from pre_commit.commands.run import _file_hash, _compute_hook_key
+        from pre_commit.commands.run import _compute_hook_key
         from pre_commit.clientlib import load_config
         from pre_commit.repository import all_hooks
         import os
@@ -1275,7 +1275,7 @@ def test_show_cache_summary_fail_colored(cap_out, store, in_git_dir):
     """Cached-fail files show RED escape when use_color=True."""
     import shlex
     import sys
-    from pre_commit.color import RED, NORMAL
+    from pre_commit.color import RED
     _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
 
     write_config(
@@ -1321,7 +1321,7 @@ def test_show_cache_summary_unknown_colored(cap_out, store, in_git_dir):
     """Unchecked files show YELLOW escape when use_color=True."""
     import shlex
     import sys
-    from pre_commit.color import YELLOW, NORMAL
+    from pre_commit.color import YELLOW
     _PASS = f'{shlex.quote(sys.executable)} -c "pass"'
 
     write_config(
@@ -1499,7 +1499,7 @@ def test_daemon_stop_waits_for_process_to_die(cap_out, store):
 
 
 def test_daemon_stop_warns_when_timeout_exceeded(cap_out, store):
-    """_daemon_stop returns 0 with a warning when the process doesn't die in time."""
+    """_daemon_stop returns 0 with a warning when process won't die."""
     import subprocess
     from unittest import mock
 
@@ -1509,8 +1509,11 @@ def test_daemon_stop_warns_when_timeout_exceeded(cap_out, store):
     _write_pid(store, pid)
 
     try:
-        # Patch _is_running to always claim the process is alive (simulates timeout)
-        with mock.patch('pre_commit.commands.daemon._is_running', return_value=True):
+        # Patch _is_running to always claim alive (simulates timeout)
+        with mock.patch(
+                'pre_commit.commands.daemon._is_running',
+                return_value=True,
+        ):
             # Also patch os.kill so SIGTERM goes nowhere harmful
             with mock.patch('os.kill'):
                 ret = _daemon_stop(store, wait=0.0)
@@ -1527,7 +1530,7 @@ def test_daemon_stop_warns_when_timeout_exceeded(cap_out, store):
 # ---------------------------------------------------------------------------
 
 def test_main_loop_removes_reverted_file_from_hashes(store, in_git_dir):
-    """When a file reverts to HEAD between polls it is removed from file_hashes."""
+    """Reverted files are removed from file_hashes on the next poll."""
     import shlex
     import sys
     from pre_commit.commands.daemon import _files_differing_from_head
@@ -1560,7 +1563,9 @@ def test_main_loop_removes_reverted_file_from_hashes(store, in_git_dir):
 
         # Simulate main loop: track hashes for differing files
         file_hashes: dict[str, str] = {}
-        changed = [f for f in differ if _file_hash(f) != file_hashes.get(f, '')]
+        changed = [
+            f for f in differ if _file_hash(f) != file_hashes.get(f, '')
+        ]
         for f in changed:
             file_hashes[f] = _file_hash(f)
         assert 'f.py' in file_hashes

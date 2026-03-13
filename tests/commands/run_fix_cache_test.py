@@ -11,7 +11,6 @@ from pre_commit.commands.run import _file_hash
 from pre_commit.commands.run import run
 from testing.fixtures import git_dir
 from testing.fixtures import write_config
-from testing.util import cmd_output_mocked_pre_commit_home
 from testing.util import cwd
 from testing.util import git_commit
 from testing.util import run_opts
@@ -372,7 +371,7 @@ def test_no_fix_flag_does_not_affect_passing_hooks(cap_out, store, in_git_dir):
 
 
 def test_fix_still_works_without_no_fix_flag(cap_out, store, in_git_dir):
-    """Control test: fix modifies file and runs normally when --no-fix not set."""
+    """Control: fix modifies file and runs normally when --no-fix not set."""
     write_config(
         '.', _local_hook(
             id='failing', name='Failing Hook',
@@ -806,5 +805,6 @@ def test_fix_can_be_overridden_for_remote_hook(
 
     printed = cap_out.get_bytes()
     assert ret == 0
-    # fix passes without modifying files → Passed (entry was skipped, no failures known)
+    # fix passes without modifying files → Passed
+    # (entry was skipped, no failures known)
     assert b'Failed' not in printed

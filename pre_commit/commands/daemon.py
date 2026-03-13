@@ -596,7 +596,7 @@ def _daemon_status(
     if status:
         started = status.get('started_at', '?')
         config = status.get('config_file', '?')
-        nhooks = status.get('hooks_count', '?')
+        nhooks = str(status.get('hooks_count', '?'))
         activity = status.get('last_activity', '?')
         output.write_line(running_hdr)
         output.write_line(
