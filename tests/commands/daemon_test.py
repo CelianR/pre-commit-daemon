@@ -1582,3 +1582,251 @@ def test_main_loop_removes_reverted_file_from_hashes(store, in_git_dir):
                 del file_hashes[f]
 
         assert 'f.py' not in file_hashes
+
+
+# ---------------------------------------------------------------------------
+# Overlay: apply_daemon_overlay() unit tests
+# ---------------------------------------------------------------------------
+
+def _make_hook_for_overlay(src='local', **overrides):
+    """Build a real Hook NamedTuple for overlay unit tests."""
+    from pre_commit.hook import Hook
+    from pre_commit.prefix import Prefix
+    defaults = {
+        'id': 'test-hook', 'name': 'Test Hook', 'entry': 'true',
+        'fix': '', 'language': 'system', 'alias': '',
+        'files': '', 'exclude': '^$',
+        'types': ['file'], 'types_or': [], 'exclude_types': [],
+        'additional_dependencies': [], 'args': [],
+        'always_run': False, 'fail_fast': False, 'pass_filenames': True,
+        'description': '', 'language_version': 'default',
+        'log_file': '', 'minimum_pre_commit_version': '0',
+        'require_serial': False, 'stages': ['pre-commit'],
+        'verbose': False, 'cache': True,
+    }
+    defaults.update(overrides)
+    return Hook.create(src, Prefix(os.getcwd()), defaults)
+
+
+def test_apply_daemon_overlay_empty_returns_unchanged():
+    """apply_daemon_overlay with empty overlay returns same tuple unchanged."""
+    from pre_commit.repository import apply_daemon_overlay
+    hook = _make_hook_for_overlay()
+    hooks = (hook,)
+    result = apply_daemon_overlay(hooks, [])
+    assert result is hooks
+
+
+def test_apply_daemon_overlay_disables_cache():
+    """overlay {cache: false} → hook.cache = False; entry unchanged."""
+    from pre_commit.repository import apply_daemon_overlay
+    hook = _make_hook_for_overlay(src='local', id='test-hook', entry='true')
+    overlay = [
+        {'repo': 'local', 'hooks': [{'id': 'test-hook', 'cache': False}]},
+    ]
+    result = apply_daemon_overlay((hook,), overlay)
+    assert len(result) == 1
+    assert result[0].cache is False
+    assert result[0].entry == 'true'
+
+
+def test_apply_daemon_overlay_sets_fix():
+    """overlay {fix: 'gofmt -w'} → hook.fix = 'gofmt -w'."""
+    from pre_commit.repository import apply_daemon_overlay
+    hook = _make_hook_for_overlay(src='local', id='test-hook')
+    overlay = [
+        {'repo': 'local', 'hooks': [{'id': 'test-hook', 'fix': 'gofmt -w'}]},
+    ]
+    result = apply_daemon_overlay((hook,), overlay)
+    assert result[0].fix == 'gofmt -w'
+
+
+def test_apply_daemon_overlay_overrides_entry_and_args():
+    """overlay {entry: 'new', args: ['-v']} → both applied."""
+    from pre_commit.repository import apply_daemon_overlay
+    hook = _make_hook_for_overlay(src='local', id='test-hook', entry='old')
+    overlay = [
+        {
+            'repo': 'local', 'hooks': [
+                {'id': 'test-hook', 'entry': 'new', 'args': ['-v']},
+            ],
+        },
+    ]
+    result = apply_daemon_overlay((hook,), overlay)
+    assert result[0].entry == 'new'
+    assert list(result[0].args) == ['-v']
+
+
+def test_apply_daemon_overlay_unmatched_id_leaves_hook_unchanged():
+    """overlay for 'other-hook' does not affect 'test-hook'."""
+    from pre_commit.repository import apply_daemon_overlay
+    hook = _make_hook_for_overlay(src='local', id='test-hook', cache=True)
+    overlay = [
+        {'repo': 'local', 'hooks': [{'id': 'other-hook', 'cache': False}]},
+    ]
+    result = apply_daemon_overlay((hook,), overlay)
+    assert result[0].cache is True
+
+
+def test_apply_daemon_overlay_matches_by_repo_and_id():
+    """overlay for a URL does NOT match a hook with src='local'."""
+    from pre_commit.repository import apply_daemon_overlay
+    hook = _make_hook_for_overlay(src='local', id='test-hook', cache=True)
+    overlay = [
+        {
+            'repo': 'https://github.com/example/repo', 'hooks': [
+                {'id': 'test-hook', 'cache': False},
+            ],
+        },
+    ]
+    result = apply_daemon_overlay((hook,), overlay)
+    assert result[0].cache is True
+
+
+# ---------------------------------------------------------------------------
+# Overlay: schema / loader tests
+# ---------------------------------------------------------------------------
+
+def test_load_daemon_config_parses_overlay(tmp_path):
+    """load_daemon_config() parses overlay and returns expected structure."""
+    from pre_commit.clientlib import load_daemon_config
+    from pre_commit.yaml import yaml_dump
+
+    overlay_data = [
+        {
+            'repo': 'local',
+            'hooks': [
+                {'id': 'my-hook', 'cache': False, 'fix': 'gofmt -w'},
+            ],
+        },
+    ]
+    overlay_file = tmp_path / '.pre-commit-daemon-config.yaml'
+    overlay_file.write_text(yaml_dump(overlay_data))
+
+    result = load_daemon_config(str(overlay_file))
+    assert len(result) == 1
+    assert result[0]['repo'] == 'local'
+    hooks = result[0]['hooks']
+    assert len(hooks) == 1
+    assert hooks[0]['id'] == 'my-hook'
+    assert hooks[0]['cache'] is False
+    assert hooks[0]['fix'] == 'gofmt -w'
+
+
+def test_load_daemon_config_rev_is_optional(tmp_path):
+    """rev field in overlay is accepted but not required."""
+    from pre_commit.clientlib import load_daemon_config
+    from pre_commit.yaml import yaml_dump
+
+    overlay_data = [
+        {
+            'repo': 'https://github.com/example/repo',
+            'rev': 'v1.0.0',
+            'hooks': [{'id': 'some-hook'}],
+        },
+    ]
+    overlay_file = tmp_path / '.pre-commit-daemon-config.yaml'
+    overlay_file.write_text(yaml_dump(overlay_data))
+
+    result = load_daemon_config(str(overlay_file))
+    assert result[0]['repo'] == 'https://github.com/example/repo'
+
+
+def test_all_hooks_applies_overlay_automatically(store, in_git_dir):
+    """all_hooks() applies overlay when daemon config file exists."""
+    from pre_commit.clientlib import load_config
+    from pre_commit.repository import all_hooks
+    from pre_commit.yaml import yaml_dump
+    import pre_commit.constants as C
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': 'true', 'language': 'system',
+                    'cache': True,
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        # Write overlay disabling cache for checker
+        overlay_data = [
+            {'repo': 'local', 'hooks': [{'id': 'checker', 'cache': False}]},
+        ]
+        with open(C.DAEMON_CONFIG_FILE, 'w') as fh:
+            fh.write(yaml_dump(overlay_data))
+
+        config = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(config, store))
+
+    assert len(hooks) == 1
+    assert hooks[0].cache is False
+
+
+def test_all_hooks_no_overlay_file_unchanged(store, in_git_dir):
+    """all_hooks() returns hooks unmodified when no overlay file exists."""
+    from pre_commit.clientlib import load_config
+    from pre_commit.repository import all_hooks
+    import pre_commit.constants as C
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'checker', 'name': 'Checker',
+                    'entry': 'true', 'language': 'system',
+                    'cache': True,
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        # Ensure no overlay file
+        overlay_path = C.DAEMON_CONFIG_FILE
+        if os.path.exists(overlay_path):
+            os.remove(overlay_path)
+
+        config = load_config('.pre-commit-config.yaml')
+        hooks = list(all_hooks(config, store))
+
+    assert len(hooks) == 1
+    assert hooks[0].cache is True
+
+
+# ---------------------------------------------------------------------------
+# Overlay: integration test
+# ---------------------------------------------------------------------------
+
+def test_daemon_start_works_without_daemon_config_file(
+        cap_out, store, in_git_dir,
+):
+    """Daemon starts normally when .pre-commit-daemon-config.yaml is absent."""
+    import pre_commit.constants as C
+
+    write_config(
+        '.', {
+            'repos': [{
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'h', 'name': 'h',
+                    'entry': 'true', 'language': 'system',
+                }],
+            }],
+        },
+    )
+    with cwd(str(in_git_dir)):
+        # Ensure overlay file is absent
+        if os.path.exists(C.DAEMON_CONFIG_FILE):
+            os.remove(C.DAEMON_CONFIG_FILE)
+
+        toplevel = git.get_root()
+        _write_pid(store, os.getpid(), toplevel)  # simulate already running
+        ret = _daemon_start('.pre-commit-config.yaml', store, interval=1.0)
+
+    # Returns 1 because already running — not because of missing overlay
+    assert ret == 1
+    assert b'already running' in cap_out.get_bytes()

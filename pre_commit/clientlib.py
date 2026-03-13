@@ -547,6 +547,50 @@ class InvalidConfigError(FatalError):
     pass
 
 
+class InvalidDaemonConfigError(FatalError):
+    pass
+
+
+# Fields not overrideable: affect env installation, identity, or hook staging.
+_OVERLAY_EXCLUDED_KEYS = frozenset({
+    'id', 'language', 'stages', 'minimum_pre_commit_version',
+    'language_version', 'additional_dependencies',
+    'files', 'exclude',   # handled separately with regex warnings below
+})
+
+DAEMON_CONFIG_HOOK_OVERLAY = cfgv.Map(
+    'Hook', 'id',
+    cfgv.Required('id', cfgv.check_string),
+    *(
+        cfgv.OptionalNoDefault(item.key, item.check_fn)
+        for item in MANIFEST_HOOK_DICT.items
+        if hasattr(item, 'key') and hasattr(item, 'check_fn')
+        if item.key not in _OVERLAY_EXCLUDED_KEYS
+    ),
+    OptionalSensibleRegexAtHook('files', cfgv.check_string),
+    OptionalSensibleRegexAtHook('exclude', cfgv.check_string),
+)
+
+DAEMON_CONFIG_REPO_OVERLAY = cfgv.Map(
+    'Repository', 'repo',
+    cfgv.Required('repo', cfgv.check_string),
+    cfgv.OptionalNoDefault('rev', cfgv.check_string),
+    cfgv.RequiredRecurse('hooks', cfgv.Array(DAEMON_CONFIG_HOOK_OVERLAY)),
+    cfgv.WarnAdditionalKeys(
+        ('repo', 'rev', 'hooks'), warn_unknown_keys_repo,
+    ),
+)
+
+DAEMON_CONFIG_SCHEMA = cfgv.Array(DAEMON_CONFIG_REPO_OVERLAY)
+
+load_daemon_config = functools.partial(
+    cfgv.load_from_filename,
+    schema=DAEMON_CONFIG_SCHEMA,
+    load_strategy=yaml_load,
+    exc_tp=InvalidDaemonConfigError,
+)
+
+
 load_config = functools.partial(
     cfgv.load_from_filename,
     schema=CONFIG_SCHEMA,

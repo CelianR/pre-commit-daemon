@@ -10,6 +10,7 @@ import sys
 import time
 from typing import Any
 
+import pre_commit.constants as C
 from pre_commit import git
 from pre_commit import output
 from pre_commit.all_languages import languages
@@ -404,6 +405,11 @@ def _daemon_start(
         install_hook_envs(hooks, store)
 
         config_hash = _file_hash(config_file)
+        daemon_cfg_file = os.path.join(os.getcwd(), C.DAEMON_CONFIG_FILE)
+        daemon_cfg_hash = (
+            _file_hash(daemon_cfg_file)
+            if os.path.exists(daemon_cfg_file) else ''
+        )
         hooks_count = len(hooks)
 
         # Seed initial file hashes (working-tree content)
@@ -440,9 +446,21 @@ def _daemon_start(
 
             # Detect config file changes
             new_config_hash = _file_hash(config_file)
-            if new_config_hash != config_hash:
+            new_daemon_cfg_hash = (
+                _file_hash(daemon_cfg_file)
+                if os.path.exists(daemon_cfg_file) else ''
+            )
+            if (
+                new_config_hash != config_hash or
+                new_daemon_cfg_hash != daemon_cfg_hash
+            ):
+                changed_file = (
+                    config_file
+                    if new_config_hash != config_hash
+                    else daemon_cfg_file
+                )
                 if foreground:
-                    _log(f'Config changed ({config_file}), reloading…')
+                    _log(f'Config changed ({changed_file}), reloading…')
                 old_hook_keys = _hook_keys_for_hooks(hooks)
                 try:
                     config = load_config(config_file)
@@ -460,6 +478,7 @@ def _daemon_start(
                                 f'removed/changed hook(s)',
                             )
                     config_hash = new_config_hash
+                    daemon_cfg_hash = new_daemon_cfg_hash
                     hooks_count = len(hooks)
                     if foreground:
                         _log(

@@ -8,6 +8,8 @@ from typing import Any
 
 import pre_commit.constants as C
 from pre_commit.all_languages import languages
+from pre_commit.clientlib import InvalidDaemonConfigError
+from pre_commit.clientlib import load_daemon_config
 from pre_commit.clientlib import load_manifest
 from pre_commit.clientlib import LOCAL
 from pre_commit.clientlib import META
@@ -229,9 +231,58 @@ def install_hook_envs(hooks: Sequence[Hook], store: Store) -> None:
             _hook_install(hook)
 
 
+def apply_daemon_overlay(
+        hooks: tuple[Hook, ...],
+        overlay: list[dict[str, Any]],
+) -> tuple[Hook, ...]:
+    """Return hooks with daemon overlay settings applied.
+
+    Matching is by (hook.src, hook.id).  Only keys present in the overlay
+    hook dict are overridden; all other fields retain their original values.
+    """
+    if not overlay:
+        return hooks
+
+    # Build lookup: (repo_url, hook_id) -> override fields (id excluded)
+    overlay_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for repo_entry in overlay:
+        repo_url = repo_entry['repo']
+        for hook_entry in repo_entry.get('hooks', []):
+            key = (repo_url, hook_entry['id'])
+            overlay_map[key] = {
+                k: v for k, v in hook_entry.items() if k != 'id'
+            }
+
+    if not overlay_map:
+        return hooks
+
+    result = []
+    for hook in hooks:
+        match_key = (hook.src, hook.id)
+        if match_key in overlay_map:
+            dct = {
+                f: getattr(hook, f)
+                for f in Hook._fields
+                if f not in {'src', 'prefix'}
+            }
+            dct.update(overlay_map[match_key])
+            result.append(Hook.create(hook.src, hook.prefix, dct))
+        else:
+            result.append(hook)
+    return tuple(result)
+
+
 def all_hooks(root_config: dict[str, Any], store: Store) -> tuple[Hook, ...]:
-    return tuple(
+    hooks = tuple(
         hook
         for repo in root_config['repos']
         for hook in _repository_hooks(repo, store, root_config)
     )
+    overlay_path = os.path.join(os.getcwd(), C.DAEMON_CONFIG_FILE)
+    if os.path.exists(overlay_path):
+        try:
+            overlay = load_daemon_config(overlay_path)
+            return apply_daemon_overlay(hooks, overlay)
+        except InvalidDaemonConfigError:
+            pass   # bad overlay → ignore, use hooks as-is
+    return hooks
